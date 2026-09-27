@@ -1,10 +1,8 @@
 # Slippi Beamer
 
-**STATUS**: Multiple brackets have succesfully run on beamer! With that said, it's still very much a project in a beta stage. The firmware is more or less settled in shape, so don't expect much to change there. The beamer client software, though, is much earlier - the Replay Reporter fork is in the process of being replaced with a separate "Beamer Fleet Manager" that will be used alongside vanilla Replay Reporter. I'm more than happy to help you (the reader) get your local running on Beamer - feel free to reach out (@jenpissgirl on Discord).
+**STATUS**: Multiple brackets have succesfully run on beamer! With that said, it's still very much a project in a beta stage. The firmware is more or less settled in shape, so don't expect much to change there. The beamer client software, though, is much earlier - [Beamer Manager](https://github.com/jendotpg/slippi-beamer-manager) is pretty untested and we're waiting for a few changes to Replay Reporter for it to integrate fully. I'm more than happy to help you (the reader) start prepping to get your local running on Beamer - feel free to reach out (@jenpissgirl on Discord).
 
-A [Beamer](https://github.com/jendotpg/slippi-beamer) is a special USB stick that can send Slippi Replays over Wifi in addition to keeping them in storage. It works together with [the Beamer version of Replay Reporter](https://github.com/jendotpg/replay-manager-for-slippi) to completely eliminate the need for USB handoffs. If you're already comfortable with Replay Reporter, you shouldn't need any technical expertise to get this up and running! The most technical part is setting up the router - your home network probably works fine for up to ~10 beamers, but if you're in a commercial venue it might be a little more complex. See [ROUTERS.md](ROUTERS.md) and don't hesitate to reach out to me directly.
-
-## Running a tournament on Beamers
+A [Beamer](https://github.com/jendotpg/slippi-beamer) is a special USB stick that can send Slippi Replays over Wifi in addition to keeping them in storage. It works together with [Beamer Manager](https://github.com/jendotpg/slippi-beamer-manager) and [Replay Reporter](https://github.com/jmlee337/replay-manager-for-slippi) to completely eliminate the need for USB handoffs. If you're already comfortable with Replay Reporter, you shouldn't need any technical expertise to get this up and running! The most technical part is setting up the router - your home network probably works fine for up to ~10 beamers, but if you're in a commercial venue it might be a little more complex. See [ROUTERS.md](https://github.com/jendotpg/slippi-beamer/blob/main/ROUTERS.md) and don't hesitate to reach out to me directly.Running a tournament on Beamers
 
 **WARNING: BEAMER IS CURRENTLY ONLY TESTED FOR TOURNAMENTS OF UP TO ~15 SETUPS. IF YOUR TOURNAMENT IS BIGGER THAN THAT AND YOU WANT TO RUN THIS, REACH OUT TO ME DIRECTLY!**
 
@@ -22,11 +20,13 @@ Finally, make sure you have some label for station numbers (I use table number s
 
 Plug one Beamer into each Wii after booting into Melee (make sure you're on Slippi Nintendont 1.13.0 or later). Press the button on the Beamer until the number on the screen matches the station number. If you overshoot, holding the button counts backwards ;)
 
-Open up the [Beamer fork of replay manager](https://github.com/jendotpg/replay-manager-for-slippi). Turn on auto-subscribe in settings. Before starting any sets, open up the Beamer menu (click the remote control Beamer icon in the top right of the screen) and click "Erase All" to wipe the drive on every Beamer. If the drive fills up, replays stop coming! You can theoretically do this at any point, but remember that this is an **Erase Button** - only do it if you don't need any of the replays on that beamer anymore. This is why I suggest doing it before bracket starts :P
+Download, install, and open [Beamer Manager](https://github.com/jendotpg/replay-manager-for-slippi). Make sure auto-subscribe is on in settings. Before starting any sets click "Erase All" (in the top right corner of the screen) to wipe the drive on every Beamer. **When a Beamer's drive fills up, replays stop coming! There is more than enough room for a tournament on each drive, but make sure to hit the Erase button in Beamer Manager before this happens.** You can theoretically do this at any point, but remember that this is an Erase Button - only do it once you don't need any of the replays on that beamer anymore. This is why I suggest doing it before bracket starts :P
 
-### Reporting
+Download, install, and open [Replay Reporter](https://github.com/jmlee337/replay-manager-for-slippi). This is the regular Replay Reporter software so if you already have it installed, just make sure it's up to date and then open it :). Go back to Beamer Manager and click the "Open in Replay Reporter" button in the top-right corner of the screen. From here you can use Replay Reporter as normal - click the "Station 1", "Station 2", etc. icons to pull up games to report!
 
-Open the Beamer menu - from here, you can see the status of all the beamers in the field. Clicking a row will download the last replays from that station so that you can report a set using the regular Replay Manager interface we all know and love.
+- If the "Open Replay Reporter" button doesn't work, don't worry - you can find the Beamer replays location in Beamer Manager settings. Just navigate to that folder using Replay Reporter's "Set Replays Folder" button in the top right. In particular, this button is finnicky on Linux systems.
+
+**Make sure that Beamer Manager stays open and that you subscribe to every station you want to report from - either manually or with auto-subscribe.**
 
 ## Buying Beamers
 
