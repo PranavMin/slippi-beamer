@@ -1,8 +1,8 @@
 # Slippi Beamer
 
-**STATUS**: Multiple brackets have succesfully run on beamer! With that said, it's still very much a project in a beta stage. The firmware is more or less settled in shape, so don't expect much to change there. The beamer client software, though, is much earlier - [Beamer Manager](https://github.com/jendotpg/slippi-beamer-manager) is pretty untested and we're waiting for a few changes to Replay Reporter for it to integrate fully. I'm more than happy to help you (the reader) start prepping to get your local running on Beamer - feel free to reach out (@jenpissgirl on Discord).
-
 A [Beamer](https://github.com/jendotpg/slippi-beamer) is a special USB stick that can send Slippi Replays over Wifi in addition to keeping them in storage. It works together with [Beamer Manager](https://github.com/jendotpg/slippi-beamer-manager) and [Replay Reporter](https://github.com/jmlee337/replay-manager-for-slippi) to completely eliminate the need for USB handoffs. If you're already comfortable with Replay Reporter, you shouldn't need any technical expertise to get this up and running! The most technical part is setting up the router - your home network probably works fine for up to ~10 beamers, but if you're in a commercial venue it might be a little more complex. See [ROUTERS.md](https://github.com/jendotpg/slippi-beamer/blob/main/ROUTERS.md) and don't hesitate to reach out to me directly.
+
+**STATUS**: Multiple brackets have succesfully run on beamer! With that said, it's still very much a project in a beta stage. The firmware is more or less settled in shape, so don't expect much to change there. The beamer client software, though, is much earlier - [Beamer Manager](https://github.com/jendotpg/slippi-beamer-manager) is pretty untested. I'm more than happy to help you (the reader) start prepping to get your local running on Beamer - feel free to reach out (@jenpissgirl on Discord).
 
 ## Running a tournament on Beamers
 
