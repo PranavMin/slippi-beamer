@@ -15,16 +15,11 @@ If you want a router that works even when the venue has no ethernet, you'll need
 
 ### Single router - TESTED AND WORKING
 
-| Setting   | Value                                                         | Per section |
-| --------- | ------------------------------------------------------------- | ----------- |
-| Mode      | Router - repeater (also called WISP or wireless WAN)          | identical   |
-| WAN       | Venue wifi, 5 GHz band (Or ethernet, if the venue offers it!) | identical   |
-| SSID      | `beamer-N`(this is really just a preference)                  | **unique**  |
-| LAN       | `10.N.0.0/24`                                                 | **unique**  |
-| 2.4 GHz   | the venue's least-contended channel                           | identical   |
-| 5 GHz     | taken by the wan (turn off!)                                  | identical   |
-| DHCP      | on                                                            | identical   |
-| Isolation | off                                                           | identical   |
+Match the screenshots below!
+
+![1790694162879](https://file+.vscode-resource.vscode-cdn.net/Users/levyjj/nycmelee/slippi-beamer/slippi-beamer/image/ROUTERS/1790694162879.png)
+
+![1790694230992](image/ROUTERS/1790694230992.png)
 
 ### Sharded sections - UNTESTED
 
@@ -76,7 +71,7 @@ flowchart TD
 
 ### Connected sections - UNTESTED
 
-**TOs can see Beamers in every section**. You'll need to bring one extra router in addition to each of the section routers, which you'll be using as APs.
+**TOs can see Beamers in every section**. You'll need to bring one extra router in addition to each of the section routers, which you'll be using as APs. This will also break the auto-status updates - so Beamer Manager will be slightly slower to update (up to ~10seconds).
 
 ```mermaid
 flowchart TD
@@ -116,26 +111,20 @@ flowchart TD
 
 #### Central router settings
 
-| Setting   | Value                                                                                        |
-| --------- | -------------------------------------------------------------------------------------------- |
-| Mode      | **No Ethernet**: Repeater (also called WISP or wireless WAN)<br /><br />**Ethernet**: Router |
-| WAN       | **No Ethernet**: Venue wifi, 5 GHz band<br /><br />**Ethernet**: Ethernet                    |
-| SSID      | `beamer-central`                                                                             |
-| LAN       | `10.0.0.0/24`                                                                                |
-| 2.4 GHz   | the venue's least-contended channel                                                          |
-| 5 GHz     | on                                                                                           |
-| DHCP      | on                                                                                           |
-| Isolation | off                                                                                          |
+Set this one up first.
+
+![1790694162879](image/ROUTERS/1790694162879.png)
+
+![1790694270378](image/ROUTERS/1790694270378.png)
 
 #### AP settings
 
-| Setting   | Value                                                                        |
-| --------- | ---------------------------------------------------------------------------- |
-| Mode      | Mesh extender (Sometimes called wireless repeater, media bridge, or just AP) |
-| WAN       | `beamer-central`, 5 GHz band                                                 |
-| SSID      | `beamer-N` **(unique per section)**                                          |
-| LAN       | `10.N.0.0/24` **(unique per section)**                                       |
-| 2.4 GHz   | the venue's least-contended channel                                          |
-| 5 GHz     | Off                                                                          |
-| DHCP      | off                                                                          |
-| Isolation | off                                                                          |
+Set this one up second - and make sure to configure the "Wireless" page before the "Network Mode" page
+
+![1790694230992](https://file+.vscode-resource.vscode-cdn.net/Users/levyjj/nycmelee/slippi-beamer/slippi-beamer/image/ROUTERS/1790694230992.png)
+
+**AND ONLY THEN**
+
+![1790696628662](image/ROUTERS/1790696628662.png)
+
+<pre class="vditor-reset" placeholder="" contenteditable="true" spellcheck="false"><p data-block="0" class=""><img src="https://file+.vscode-resource.vscode-cdn.net/Users/levyjj/nycmelee/slippi-beamer/slippi-beamer/image/ROUTERS/1790694162879.png" alt="1790694162879"/></p></pre>

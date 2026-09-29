@@ -13,6 +13,7 @@ use esp_idf_svc::sys::{
 };
 use esp_idf_svc::wifi::{
     AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi, ScanMethod,
+    ScanSortMethod,
 };
 
 use crate::errors::{self, Target};
@@ -127,11 +128,7 @@ impl Radio {
             ssid: truncating(&join.ssid),
             password: truncating(join.password.as_deref().unwrap_or("")),
             auth_method: auth,
-            scan_method: if join.hidden {
-                ScanMethod::CompleteScan(Default::default())
-            } else {
-                ScanMethod::FastScan
-            },
+            scan_method: ScanMethod::CompleteScan(ScanSortMethod::Signal),
             ..Default::default()
         };
         self.wifi
