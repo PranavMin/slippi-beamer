@@ -66,6 +66,7 @@ Station number is set with the button on the beamer - clicking goes up and, if y
 | `LED-BRIGHTNESS`     | `20`    | The status LED brightness, 0 to 100 percent.                                                                                                              |
 | `FLIP-SCREEN`        | `false` | Whether the screen starts upside down. If you stand your Wii up, you probably want this.                                                                  |
 | `DEBUG`              | `false` | Debug mode. Don't use this unless you know what you're doing.                                                                                             |
+| `LAZYTO`             | `false` | LazyTO mode (this fork only): the Beamer carries a LazyTO Wii's relay traffic over its own Wi-Fi. Read at boot only. See [LAZYTO.md](LAZYTO.md).          |
 
 ## Learn More
 

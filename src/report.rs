@@ -128,6 +128,16 @@ pub struct LinkInfo {
     pub channel: u8,
 }
 
+/// LazyTO mode's line in `GET /status` (LAZYTO.md).
+#[derive(Debug, Clone, Copy)]
+pub struct LazytoInfo {
+    pub relay: Option<std::net::SocketAddrV4>,
+    pub requests_served: u32,
+    pub last_result: Option<&'static str>,
+    /// the mailbox's own counters, by name
+    pub mailbox: [(&'static str, u32); 7],
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn status_json(
     station_id: &str,
@@ -141,6 +151,7 @@ pub fn status_json(
     has_errors: bool,
     warnings: &[&str],
     net: Health,
+    lazyto: Option<LazytoInfo>,
     s: &mut Buf<STATUS_CAP>,
 ) {
     let health = match (has_errors, net) {
@@ -193,6 +204,29 @@ pub fn status_json(
         now_s,
     );
     line_secs_since(s, "secs_since_game_start", fast.game_start_at, now_s);
+    if let Some(l) = lazyto {
+        s.push_str("  \"lazyto\": {\"relay\": ");
+        match l.relay {
+            Some(r) => {
+                let _ = write!(s, "\"{r}\"");
+            }
+            None => s.push_str("null"),
+        }
+        let _ = write!(s, ", \"requests_served\": {}", l.requests_served);
+        s.push_str(", \"last_result\": ");
+        match l.last_result {
+            Some(r) => {
+                let _ = write!(s, "\"{r}\"");
+            }
+            None => s.push_str("null"),
+        }
+        s.push_str(", \"mailbox\": {");
+        for (i, (name, n)) in l.mailbox.iter().enumerate() {
+            let sep = if i == 0 { "" } else { ", " };
+            let _ = write!(s, "{sep}\"{name}\": {n}");
+        }
+        s.push_str("}},\n");
+    }
     line_str(s, "health", Some(health.as_str()));
 
     s.push_str("  \"warnings\": ");

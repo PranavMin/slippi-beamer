@@ -49,6 +49,7 @@ pub const LED_PCT_DEFAULT: u8 = 20;
 pub const LED_PCT_MAX: u8 = 100;
 pub const DEBUG_DEFAULT: bool = false;
 pub const FLIP_SCREEN_DEFAULT: bool = false;
+pub const LAZYTO_DEFAULT: bool = false;
 
 const STRICT_FLAGS: bool = true;
 
@@ -297,6 +298,7 @@ pub struct Config {
     led_brightness: LedBrightness,
     flip_screen: bool,
     debug: bool,
+    lazyto: bool,
 }
 
 impl Config {
@@ -322,6 +324,10 @@ impl Config {
 
     pub fn debug(&self) -> bool {
         self.debug
+    }
+
+    pub fn lazyto(&self) -> bool {
+        self.lazyto
     }
 
     pub fn hostname(&self, station_id: &str) -> String {
@@ -419,6 +425,14 @@ impl Config {
             }
         };
 
+        let lazyto = match parse_flag("LAZYTO", raw.lazyto.as_deref()) {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(e);
+                LAZYTO_DEFAULT
+            }
+        };
+
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -440,6 +454,7 @@ impl Config {
             led_brightness,
             flip_screen,
             debug,
+            lazyto,
         })
     }
 }
@@ -483,6 +498,7 @@ pub struct Settings {
     pub led_global: u8,
     pub flip_screen: bool,
     pub debug: bool,
+    pub lazyto: bool,
 }
 
 impl Settings {
@@ -494,6 +510,7 @@ impl Settings {
                 led_global: cfg.led_brightness().global(),
                 flip_screen: cfg.flip_screen(),
                 debug: cfg.debug(),
+                lazyto: cfg.lazyto(),
             },
             Outcome::Rejected(_) | Outcome::Unreadable(_) => Settings {
                 num_replays: KEEP_DEFAULT,
@@ -501,6 +518,7 @@ impl Settings {
                 led_global: LedBrightness::DEFAULT.global(),
                 flip_screen: FLIP_SCREEN_DEFAULT,
                 debug: DEBUG_DEFAULT,
+                lazyto: LAZYTO_DEFAULT,
             },
         }
     }
@@ -518,6 +536,7 @@ struct Raw {
     led_brightness: Option<String>,
     flip_screen: Option<String>,
     debug: Option<String>,
+    lazyto: Option<String>,
 }
 
 impl Raw {
@@ -546,6 +565,7 @@ impl Raw {
                 "LED-BRIGHTNESS" | "LED_BRIGHTNESS" => raw.led_brightness = Some(value),
                 "FLIP-SCREEN" | "FLIP_SCREEN" => raw.flip_screen = Some(value),
                 "DEBUG" => raw.debug = Some(value),
+                "LAZYTO" => raw.lazyto = Some(value),
                 _ => {}
             }
         }

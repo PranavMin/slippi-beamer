@@ -322,6 +322,12 @@ fn with_status_body<R>(f: impl FnOnce(&report::Buf<{ report::STATUS_CAP }>) -> R
                 super::NetResult::Offline => report::Health::Ok,
                 super::NetResult::Fail => report::Health::Error,
             },
+            super::relay::snapshot().map(|r| report::LazytoInfo {
+                relay: r.relay,
+                requests_served: r.served,
+                last_result: r.last,
+                mailbox: r.mailbox,
+            }),
             &mut buf,
         );
     });

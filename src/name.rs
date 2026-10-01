@@ -7,7 +7,12 @@ pub fn reset() {
 }
 
 pub fn current() -> String {
-    format!("Station {}", N.load(Ordering::Relaxed))
+    format!("Station {}", number())
+}
+
+/// The station number on the screen, without the allocation `current` makes.
+pub fn number() -> u16 {
+    N.load(Ordering::Relaxed)
 }
 
 pub fn bump() {

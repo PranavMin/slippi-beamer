@@ -59,6 +59,10 @@ Everything here is cached by the scan tick so this `GET` is very cheap - **it's 
   "secs_since_port_change": null, # how long have just these ports been in use
   "secs_since_character_change": null, # how long has this ports+characters combo been in use
   "secs_since_game_start": null, # how many seconds since the last game start
+  # only with LAZYTO=true (this fork, see LAZYTO.md); absent otherwise:
+  "lazyto": {"relay": "192.168.1.20:29470", "requests_served": 12, "last_result": "ok",
+             "mailbox": {"requests": 12, "repeats": 0, "malformed": 0, "telemetry": 40,
+                         "telemetry_bad": 0, "refused": 0, "stale": 0}},
   "health": "ok", # ok, starting, warn, or errror
   "warnings": []
   # note the lack of "errors" array - "health": "error" says you gotta walk up to the beamer anyway!

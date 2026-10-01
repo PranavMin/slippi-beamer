@@ -419,8 +419,13 @@ impl<'d> Lcd<'d> {
                 .min(100);
             let mut line = Line::new();
             line.push_num(pct).push("% full");
+            if d.relay {
+                line.push(" RELAY");
+            }
             fill = line;
             (fill.as_str(), GREY)
+        } else if d.relay {
+            ("RELAY", GREY)
         } else {
             return;
         };

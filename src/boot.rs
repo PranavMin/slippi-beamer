@@ -96,7 +96,7 @@ pub fn run() -> anyhow::Result<()> {
         }
     });
     log::info!("card {} MB", sd.bytes() / (1024 * 1024));
-    check_partition(&sd);
+    let replay_end = check_partition(&sd);
 
     // --- PrepareForBind --------------------------------------------------
     journal::mark(Phase::PrepareForBind);
@@ -108,6 +108,7 @@ pub fn run() -> anyhow::Result<()> {
     if !settings.debug {
         journal::disable();
     }
+    show_host(replay_end, settings.lazyto);
 
     // --- BindCard --------------------------------------------------------
     journal::mark(Phase::BindCard);
@@ -159,6 +160,12 @@ pub fn run() -> anyhow::Result<()> {
             &["the network task would not start", &format!("{e}")],
         );
         net::give_up();
+    }
+
+    if storage::mailbox::installed() {
+        if let Err(e) = net::relay::spawn() {
+            log::error!("the LazyTO relay task would not start: {e}");
+        }
     }
 
     // --- Running ------------------------------------------------------------
@@ -654,15 +661,17 @@ fn report_previous_boot() {
     errors::record_previous("panic", &lines);
 }
 
-fn check_partition(sd: &SdCard) {
+/// The replay partition's end when the card is usable: the host's visible
+/// size, which `show_host` sets once the config has been read.
+fn check_partition(sd: &SdCard) -> Option<u32> {
     match sd.partition() {
         Partition::Ok { sectors, end } => {
-            storage::msc::set_visible(end);
             log::info!(
                 "replay partition {} MB, within the limit; host sees {} MB",
                 sectors / 2048,
                 end / 2048,
             );
+            return Some(end);
         }
         Partition::TooBig { sectors } => {
             let detail = format!(
@@ -702,6 +711,32 @@ fn check_partition(sd: &SdCard) {
             );
         }
     }
+    None
+}
+
+/// Before the bind: the host sees the replay partition, plus in LazyTO mode
+/// the mailbox right after it (LAZYTO.md), served from RAM.
+fn show_host(replay_end: Option<u32>, lazyto: bool) {
+    let Some(end) = replay_end else {
+        if lazyto {
+            log::warn!("LazyTO: no usable replay partition, so no mailbox");
+        }
+        return;
+    };
+    if !lazyto {
+        storage::msc::set_visible(end);
+        return;
+    }
+    if !storage::mailbox::install(end) {
+        log::error!("LazyTO: no heap for the mailbox; the Wii will find no beamer");
+        storage::msc::set_visible(end);
+        return;
+    }
+    storage::msc::set_visible(end + storage::mailbox::SECTORS);
+    log::info!(
+        "LazyTO: mailbox at sector {end}, host sees {} sectors",
+        end + storage::mailbox::SECTORS,
+    );
 }
 
 fn write_window(sd: &SdCard, id: &StationId) -> Outcome {
@@ -741,10 +776,11 @@ fn write_window(sd: &SdCard, id: &StationId) -> Outcome {
                 cfg.hostname(&station_id),
             );
             log::info!(
-                "config: file cap {}, LED {}%, debug {}",
+                "config: file cap {}, LED {}%, debug {}, lazyto {}",
                 cfg.replay_cap(),
                 cfg.led_brightness().get(),
                 cfg.debug(),
+                cfg.lazyto(),
             );
         }
         Outcome::Rejected(problems) => {

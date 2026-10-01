@@ -1,12 +1,16 @@
 # LazyTO over the Beamer (experimental, undecided)
 
 This branch (`LazyTO`) explores one idea for [LazyTO](https://github.com/PranavMin/LazyTO): the
-Beamer carries LazyTO's relay traffic, so the Wii never uses its own network. It is a
-feasibility study, not a plan of record. Nothing here is built yet, and the upstream firmware
-on `esp-32` is untouched.
+Beamer carries LazyTO's relay traffic, so the Wii never uses its own network. The upstream
+firmware on `esp-32` is untouched.
 
 Study written 2026-10-01 against upstream `8b655fa` (this fork's base), the LazyTO relay
 (PranavMin/LazyTO), and LazyTO Nintendont (PranavMin/Nintendont, branch `LazyTO`).
+
+**Status, 2026-10-01: the firmware side is built** (see [LazyTO mode as built](#lazyto-mode-as-built)
+below), and compiles; it has not run on hardware yet. The Nintendont side does not exist yet.
+Where the study and the built firmware disagree, the built section wins: the Wii, not the
+Beamer, holds the relay secret, and the only config key is `LAZYTO`.
 
 ## The idea
 
@@ -60,6 +64,9 @@ raises that limit to `end + 16` and serves those 16 sectors from RAM:
 
 ### Sector layout
 
+(The study's sketch. The built layout is LazyTO's `protocol.yaml`; see
+[the mailbox as built](#the-mailbox-c).)
+
 | Sector | Direction | Contents |
 |--------|-----------|----------|
 | `end+0` | ESP to Wii | HELLO and status: magic `LAZYTOMB`, layout version, flags (Wi-Fi joined, relay found, secret set), relay address and port, station number (from the button), stream flag, firmware version |
@@ -79,8 +86,9 @@ raises that limit to `end + 16` and serves those 16 sectors from RAM:
 - **The USB callback only copies.** It runs in the TinyUSB task (priority 22, core 1), so it
   only does a `memcpy` and notifies the relay task. All network work happens in that task on
   core 0.
-- **The ESP owns the secret.** The ESP prepends the relay's 20-byte `relay_auth`. The secret
-  lives in `CONFIG/config.txt`, so the Wii never holds it.
+- ~~**The ESP owns the secret.**~~ Superseded: the Wii writes `relay_auth` (and so the
+  secret from its `tournament.cfg`) into the request itself, exactly the bytes it would send
+  on its own TCP connection, and the Beamer is a pure pipe that never parses them.
 - **One request at a time.** This matches the kernel today: one buffer and one state machine.
 
 ### Round trip
@@ -109,9 +117,11 @@ raises that limit to `end + 16` and serves those 16 sectors from RAM:
    - forward telemetry.
 
    All buffers are static, under the firmware's rule of no allocation over 512 B while running.
-3. **Config keys** `LAZYTO-SECRET` and `LAZYTO-STREAM`. The station number comes from the button
-   that already exists.
-4. **Optional:** the LCD shows the relay state and the current set.
+3. ~~**Config keys** `LAZYTO-SECRET` and `LAZYTO-STREAM`.~~ As built: one key, `LAZYTO`; the
+   secret and the stream flag stay in the Wii's `tournament.cfg`. The station number comes from
+   the button that already exists.
+4. **Optional:** the LCD shows the relay state and the current set. (As built: the relay state
+   only.)
 
 **LazyTO Nintendont (a feature branch, when started):**
 
@@ -131,7 +141,8 @@ kiosk. The relay itself is unchanged.
 - **The game must boot from SD.** Slippi Nintendont writes replays to USB only when the game is
   not on USB, and the Beamer takes the USB port. Beamer stations already work this way.
 - **LazyTO Nintendont is version 1.13.1.** The Beamer needs 1.13.0 or later.
-- **Each Beamer's `config.txt` needs the relay secret,** as well as the SSID and password.
+- **Each Beamer's `config.txt` needs `LAZYTO=true`,** as well as the SSID and password. (The
+  study had the secret here too; as built, the Wii keeps it.)
 - **The Wi-Fi problem moves to the ESP.** Upstream recommends the TO's own router within about
   20 ft. The ESP is still better placed than the Wii: 802.11n, power save off, and a screen that
   shows when it is not connected.
@@ -167,6 +178,187 @@ kiosk. The relay itself is unchanged.
 | 1. Mailbox, with a PC as the host | This firmware with the mailbox and relay task. A Linux box (or WSL with usbipd) runs a script that plays the Wii with `O_DIRECT` reads and writes on `/dev/sdX` | LIST_SETS comes back byte-exact from a dev relay (LazyTO `test/fake-startgg.ts`) in under 200 ms |
 | 2. On a Wii | Step 1 firmware and a LazyTO Nintendont build with the transport and the lock, with Network off in the loader | A full set lifecycle over 20 games with no replay lost, including the report at game end while the Beamer serves the previous replay |
 | 3. Load | Several Beamers | 12 stations through a bracket, or `tools/stress_station.py` as a stand-in |
+
+## LazyTO mode as built
+
+Built 2026-10-01. It compiles (`cargo build --release`); the C mailbox has been exercised on a
+PC with stubbed FreeRTOS, and `tools/lazyto_host.py` against a disk image, but nothing has run on
+a Beamer yet.
+
+### Turning it on
+
+`CONFIG/config.txt`:
+
+```
+LAZYTO=true
+```
+
+It is a flag like `FLIP-SCREEN` and `DEBUG` (`true`/`false`, `yes`/`no`, `1`/`0`; default
+`false`), and like `DEBUG` it is read at boot only, because it changes the size of the drive the
+host sees. An edit while running is logged and takes effect at the next boot. A config that is
+rejected turns it off, as it resets every other key.
+
+With `LAZYTO=false` the firmware is upstream's: the host sees exactly the replay partition, the
+mailbox check in `transfer()` returns at its first test, and there is no task, no socket and no
+buffer. Its fixed state is about 240 B of `.bss`.
+
+With `LAZYTO=true` the Beamer still needs `SSID` and `PASSWORD`. It finds the relay by itself
+(its beacon); there is no relay address to configure. The secret stays on the Wii.
+
+### The protocol header
+
+`components/beamer_lazyto/include/relay_proto.h` is a verbatim copy of LazyTO's
+`generated/relay_proto.h` (as of LazyTO branch `beamer`, commit `d639861`), which LazyTO's
+`tools/gen_protocol.py` generates from its `protocol.yaml`. **Never hand-edit it**: change
+`protocol.yaml` in LazyTO, regenerate, and copy the file over again. Rust sees it through bindgen as `esp_idf_sys::lazyto` (the
+`bindings_module` in `Cargo.toml`), so its names never mix with ESP-IDF's. All multi-byte
+integers in it are big-endian on the wire; the ESP32 is little-endian, so every field is read
+and written byte by byte.
+
+### The mailbox (C)
+
+`components/beamer_lazyto/beamer_lazyto.c`, hooked into `transfer()` in
+`components/beamer_msc/beamer_msc.c` ahead of the visible-size check and the write-back cache.
+The window starts at the replay partition's end (`check_partition` in `src/boot.rs`), and the
+host's visible size becomes `end + BEAMER_MB_SECTORS`.
+
+| Offset | Constant | Direction | Contents | Host write |
+|--------|----------|-----------|----------|------------|
+| 0 | `BEAMER_MB_HELLO` | Beamer to Wii | `beamer_hello`: `LAZYTOMB`, `BEAMER_MB_VERSION`, flags (`BF_WIFI` when the station has an address, `BF_RELAY` once a beacon has been heard), the station number on the screen, the relay's address and port, `fw_build` (`BEAMER_LAZYTO_FW_BUILD`, now 1) | refused |
+| 1 | `BEAMER_MB_REQ` | Wii to Beamer | `beamer_req_hdr` (`'M','Q'`, `seq`, `len` up to 500), then the bytes for the relay: `relay_auth` + `relay_hdr` + payload | taken; reads return what was last written |
+| 2-9 | `BEAMER_MB_RESP` | Beamer to Wii | `beamer_resp_hdr` (`'M','R'`, `result`, `seq`, `len`), then up to 4,084 reply bytes | refused |
+| 10-11 | `BEAMER_MB_TELE` | Wii to Beamer | `beamer_tele_hdr` (`'M','E'`, `seq`, `len` up to 1,012), then one telemetry datagram | taken; reads return what was last written |
+| 12-15 | | | spare, read as zeros | refused |
+
+Rules, as built:
+
+- **Never the card.** Mailbox transfers never reach the SD card or the write-back cache, so the
+  FAT rule in `FIRMWARE_DETAILS.md` holds. They are not counted as reads or writes (the `BUSY`
+  blink), not timed into the transfer ring, and a mailbox write is not a config edit.
+- **Edges.** A transfer that overlaps the window but starts outside it, a READ(10)/WRITE(10)
+  that began on the card and runs into it, or one that runs past its end, fails (-1).
+- **Requests.** Taken on a write of sector 1. `seq` 0 is ignored. The same `seq` as the last
+  one taken is ignored (a USB retry; counted as `repeats`), so the relay sees each `seq` once.
+  Bad magic or `len` over 500: answered `BR_BAD_REQ` for that `seq`, without the relay. A
+  request not yet taken when a newer one lands is replaced: the Wii gave up on it.
+- **Telemetry.** Taken when the write that completes the datagram lands; the header's `len`
+  says whether it needs one sector or both. One WRITE(10) of both sectors, a single sector for a
+  short datagram, or the header sector first and the second after, all work. New `seq` only.
+- **Re-enumeration.** When the host configures or drops the device (`tud_mount_cb`,
+  `tud_umount_cb`: a Wii reboot), the last `seq`s are forgotten, a request not yet taken is
+  dropped, the response goes back to `seq` 0, and an answer still in flight for the old session
+  is discarded (`stale`). A rebooted kernel that starts again at `seq` 1 is therefore neither
+  ignored nor handed the previous session's reply.
+- **The USB callback stays fast.** It copies under a spinlock and gives a binary semaphore;
+  nothing else. All network work happens in the relay task on core 0.
+
+C API (`components/beamer_lazyto/include/beamer_lazyto.h`; Rust wrapper
+`src/storage/mailbox.rs`):
+
+| Function | Who | What |
+|----------|-----|------|
+| `beamer_lazyto_install(first)` | boot, before the USB bind | takes the buffers, turns the window on |
+| `beamer_lazyto_set_hello(flags, station, ip, port)` | relay task | HELLO's live fields |
+| `beamer_lazyto_wait(ms)` | relay task | sleeps until the host hands something over; returns `BEAMER_LAZYTO_EV_*` bits |
+| `beamer_lazyto_take_request(out, cap, &seq, &gen, &bad)` | relay task | copies the pending request out |
+| `beamer_lazyto_resp_begin()` / `beamer_lazyto_resp_commit(gen, seq, result, len)` | relay task | withdraws the old response and hands out the body buffer / publishes the new one |
+| `beamer_lazyto_take_telemetry(out, cap)` | relay task | copies the pending datagram out |
+| `beamer_lazyto_stats(&s)` | `/status` | the counters |
+| `beamer_lazyto_transfer(...)`, `beamer_lazyto_host_reset()` | `beamer_msc.c` only | the USB side |
+
+### Memory ordering of the response
+
+The response is 4 KB and is read off the relay's socket straight into the mailbox, so it is not
+copied under the spinlock. It is a seqlock, with `seq` 0 as the "being written" marker:
+
+- The relay task (core 0) stores `seq = 0`, then a release fence, then writes the body; then,
+  under the spinlock, `result` and `len`, and last a release store of the new `seq`.
+- The USB task (core 1) loads `seq` with acquire, copies `result`, `len` and the body, then an
+  acquire fence and loads `seq` again. If the two loads differ, the header it hands the host
+  says `seq` 0.
+
+So a host that reads `seq = n` has read the whole body that was complete when `n` was published,
+and a read that overlapped a write says "no response yet", which the Wii polls through. The
+host's 8-sector READ(10) reaches `transfer()` as two 2 KB chunks (`CFG_TUD_MSC_EP_BUFSIZE`); if
+`seq` changes between the chunks of one command, the later chunk fails and the host retries the
+command, so the 8 sectors are never half one answer and half the next. By protocol that cannot
+happen anyway (the Wii sends its next request only after it has read the answer); it is a
+guard. Writes to `seq` and the session counter happen under the same spinlock, so a reset
+between a commit's check and its store cannot publish a stale answer.
+
+### The relay task (Rust)
+
+`src/net/relay.rs`: FreeRTOS task `relay`, priority 4, core 0, 4 KB stack, started after `net`
+and only when the mailbox is installed. It wakes as soon as the host writes, and every 250 ms
+otherwise.
+
+- **Discovery.** One UDP socket on `BEACON_PORT` (29471), with `SO_BROADCAST` (lwIP hands
+  broadcasts only to such sockets), non-blocking. A valid beacon is exactly 12 bytes, `'M','T'`,
+  `RELAY_PROTO_VERSION`, and a nonzero `tcp_port`; the relay is the datagram's source address
+  plus `tcp_port`, and the latest valid beacon wins. Until one is heard, and while the station
+  has an address, it broadcasts a beacon request (a `relay_beacon` with `tcp_port` and
+  `event_id` 0) to `255.255.255.255:TELEMETRY_PORT` every `BEACON_INTERVAL_MS`; the relay answers
+  unicast to port 29471.
+- **Requests.** `BR_BAD_REQ` for a malformed sector; `BR_NO_WIFI` when the station has no
+  address (the one the screen shows); `BR_NO_RELAY` when no beacon has been heard. Otherwise one
+  TCP connection: connect, send the bytes, read until the relay closes, all inside 2,500 ms (the
+  Wii's own budget is 3,000 ms), close. A failed connect, send or read is `BR_CONNECT`, a spent
+  budget `BR_TIMEOUT`, more than 4,084 bytes `BR_TOO_LARGE`. One attempt, no retries; the kiosk
+  shows the error and A retries.
+- **Telemetry.** One UDP datagram to the relay's `TELEMETRY_PORT`, best effort; dropped while
+  there is no address or no relay.
+- **Stopping.** It stands down when the station is ejected or restarts.
+
+### What shows it
+
+- `GET /status` carries a `"lazyto"` object in LazyTO mode only: the relay's address (or
+  `null`), requests served, the last result, and the mailbox's counters (`API.md`).
+- The screen's grey line under the station name ends in `RELAY` once the relay has been heard
+  (`42% full RELAY`).
+- The log has one line per request: `seq`, sizes, result, milliseconds. With `DEBUG`, the
+  relay task's unused stack follows each one.
+
+### Memory
+
+| | Bytes | When |
+|-|------:|------|
+| `.bss`: HELLO, seqs, counters, the wake semaphore | ~240 | always |
+| Mailbox buffers (request 512, telemetry 1,024, response 4,084), one `heap_caps_calloc` | 5,620 | once at boot, `LAZYTO=true` only |
+| Relay task stack | 4,096 | once at boot, `LAZYTO=true` only |
+| Relay task scratch (one request or one datagram on its way out) | 1,012 | once at boot, `LAZYTO=true` only |
+| The UDP socket | ~500 | once, `LAZYTO=true` only |
+| One request's TCP socket, pcb and reply segments | ~5,000 | per request, freed when the relay closes |
+
+Against this fork's base built with the same toolchain: `.dram0.bss` +240 B, IRAM unchanged,
+`.flash.text` +17 KB, `.flash.rodata` +2.5 KB. Nothing is allocated per request by the firmware
+itself; lwIP's own allocations fail softly (`BR_CONNECT`).
+
+### Hardware test
+
+`tools/lazyto_host.py` plays the Wii from a Linux PC (step 1 of the test plan). It reads the
+MBR, finds the first FAT32 partition's end as the firmware does, and prints HELLO; with
+`--list-sets --secret S --station N` it writes a `CMD_LIST_SETS` request and polls the response
+sector every 10 ms, then prints the transport result, the relay's status and message, and the
+sets. All I/O is `O_DIRECT`. It takes every constant and offset from the generated header.
+
+```
+sudo tools/lazyto_host.py /dev/sdX
+sudo tools/lazyto_host.py /dev/sdX --list-sets --secret S --station 1
+```
+
+### Known limits and open questions
+
+1. **TCP connections.** `LWIP_MAX_ACTIVE_TCP` is 2 and httpd may hold 2 sockets. While Beamer
+   Manager has both open, the relay connect fails (`BR_CONNECT`): exactly the game-end report.
+   Raising the limit to 3 would also raise `HEAP_FLOOR` (it is computed from it) and so change
+   when upstream's `LOW MEMORY` shows; capping httpd at one socket in LazyTO mode is the other
+   option. Measure on hardware first.
+2. **The relay task's stack** (4 KB) is unmeasured; `DEBUG` logs what is left after each request.
+3. **A storage fault** (`NO SD CARD`, `SD UNREADABLE`, `NO USB`) makes the drive write-protected,
+   which refuses mailbox writes too; after an eject the medium is gone. The Wii then times out.
+4. **The relay is never forgotten**, only replaced by a newer beacon.
+5. **HELLO's station** is the number on the Beamer's screen, for display. The station the relay
+   acts on is the one the Wii puts in `relay_hdr`; the Beamer never reads it.
 
 ## Related, but not part of this branch
 

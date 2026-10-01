@@ -30,6 +30,13 @@ bindings_header = "components/beamer_msc/include/beamer_msc.h"
 component_dirs = ["components/beamer_gz"]
 bindings_header = "components/beamer_gz/include/beamer_gz.h"
 
+# LazyTO mode (LAZYTO.md). Its own module, esp_idf_sys::lazyto, so the
+# generated relay_proto.h names never mix with ESP-IDF's.
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/beamer_lazyto"]
+bindings_header = "components/beamer_lazyto/include/beamer_lazyto.h"
+bindings_module = "lazyto"
+
 [profile.release]
 opt-level = "s"
 

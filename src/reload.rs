@@ -197,6 +197,11 @@ impl Watcher {
             log::info!("reload: DEBUG is read at boot only; it takes effect on the next one");
         }
 
+        if next.lazyto != was.lazyto {
+            // the host's view of the drive's size changes with it
+            log::info!("reload: LAZYTO is read at boot only; it takes effect on the next one");
+        }
+
         if next != was {
             log::info!(
                 "reload: {} served, cap {}, LED {}, flipped {}",

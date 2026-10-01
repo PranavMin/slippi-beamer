@@ -102,6 +102,7 @@ Everything else is strictly read-only and re-reads the FAT rather than caching a
 | `beamer_wbc.c` `s_stack`     |       4,096 | `beamer_wbc` flush task stack                                                                                                                                                                            |
 | `beamer_wbc.c` `s_meta`      |         384 | 32 slot descriptors                                                                                                                                                                                      |
 | `volume.rs` `WIPE_BATCH`     |       2,048 | 8 replay names for`POST /reset-beamer`, so the wipe does not build a list of every replay on the heap                                                                                                    |
+| `beamer_lazyto.c` and `relay.rs` |    ~240 | the LazyTO mailbox's fixed state: HELLO, seqs, counters, the wake semaphore. Its buffers are taken at boot and only in LazyTO mode (below), so `LAZYTO=false` costs just this                                |
 | everything else              |       4,239 |                                                                                                                                                                                                          |
 | **Total**                    | **151 KiB** |                                                                                                                                                                                                          |
 
@@ -119,6 +120,7 @@ Everything else is strictly read-only and re-reads the FAT rather than caching a
 | The read window's FatFs registration                                                                                                                                                                                         |        2,220 |
 | The rendered reset census, two short lines held for the boot                                                                                                                                                                 |         ~250 |
 | Journal drain task (only when`DEBUG=true`)                                                                                                                                                                                   |        8,192 |
+| LazyTO mode (only when `LAZYTO=true`): the mailbox's sector buffers 5,620 (`beamer_lazyto.c`: request 512, telemetry 1,024, response 4,084), the relay task's stack 4,096 and outgoing scratch 1,012, its UDP socket ~500   |      ~11,200 |
 | **Total**                                                                                                                                                                                                                    | **~125 KiB** |
 
 #### Allocated by lwIP
@@ -130,6 +132,7 @@ Everything else is strictly read-only and re-reads the FAT rather than caching a
 | **Both sockets,`max_open_sockets` = 2**        | **18,432** | what serving actually costs, since replay bytes fill every segment       |
 | The WiFi driver's copy of each of those frames |     19,560 | ~1,630 B per frame,`MALLOC_CAP_INTERNAL\|DMA\|8BIT`, taken on demand     |
 | **Peak in flight**                             | **37,992** | every byte in flight is buffered twice, once each side of the driver     |
+| LazyTO: one relay request                      |    ~5,000 | a socket and pcb, the request's one segment, and up to 3 segments of reply waiting to be read; all freed when the relay closes. `LWIP_MAX_ACTIVE_TCP` = 2, so the connect fails (`BR_CONNECT`) while both HTTP sockets are open |
 
 #### Summary
 
@@ -142,6 +145,7 @@ Everything else is strictly read-only and re-reads the FAT rather than caching a
 | ...left for the heap                  |    187 KiB |
 | Allocated once at boot,`DEBUG=false`  |   ~117 KiB |
 | ...`DEBUG=true`                       |   ~125 KiB |
+| ...`LAZYTO=true` adds                 |    ~11 KiB |
 | Allocated by lwIP while serving       |   9-18 KiB |
 | Free heap at rest                     |    ~59 KiB |
 | Free heap while serving               | ~25-45 KiB |
@@ -166,6 +170,10 @@ Errors quiesce the cache before the LED turns red by switching to write-through 
 
 Card errors aren't passed immediately back to the host. A failed card write stays dirty and the drain retries it, and meanwhile the host's write is held - in the full-cache wait, or retried in write-through - for up to 30 s from the start of its read or write.The station's own reads are not held: they fail on the first error. Each failed card write raises `WRITE FAILED`, and a card that stays busy through IDF's whole 5 s post-write poll raises `CARD STUCK`.
 
+#### The LazyTO mailbox
+
+With `LAZYTO=true` the host sees 16 more sectors than the replay partition, and `transfer()` in `beamer_msc.c` serves those from RAM before the visible-size check and the write-back cache: they never reach the card, so the FAT rule above still holds. They do not count as reads or writes for the `BUSY` blink, and a write there is not a config edit. The layout, the round trip and the memory ordering are in [LAZYTO.md](LAZYTO.md).
+
 #### FreeRTOS tasks
 
 I really make an effort to keep this table up to date - it's not trivially self documenting.
@@ -178,6 +186,7 @@ I really make an effort to keep this table up to date - it's not trivially self 
 | `transfer`                  | 4                      | 0    | `src/net/transfer.rs`                |
 | `net`                       | 4                      | 0    | `src/net/mod.rs`                     |
 | `scan`                      | 4                      | 0    | `src/scan.rs`                        |
+| `relay` (LAZYTO only)       | 4                      | 0    | `src/net/relay.rs`                   |
 | `status`                    | 3                      | 0    | `src/status/mod.rs`                  |
 | `journal` (DEBUG only)      | 1                      | 1    | `src/journal.rs`                     |
 | `jrnl-log`                  | 1                      | 1    | `src/journal.rs`                     |

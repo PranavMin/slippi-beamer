@@ -67,6 +67,7 @@ pub struct Detail {
     pub more: u32,
     pub warn: Option<WarningLabel>, // the most severe warning standing
     pub warn_more: u32,
+    pub relay: bool, // LazyTO mode only: the relay's beacon has been heard
 }
 
 static STATE: AtomicU8 = AtomicU8::new(State::Booting as u8);
@@ -75,6 +76,7 @@ static LED_GLOBAL: AtomicU8 = AtomicU8::new(crate::config::LedBrightness::DEFAUL
 static DETAIL: Mutex<Option<Detail>> = Mutex::new(None);
 static GEN: AtomicU32 = AtomicU32::new(0);
 static FLIPPED: AtomicBool = AtomicBool::new(false);
+static IP: AtomicU32 = AtomicU32::new(0); // the address `set_net` last showed, 0 = none
 
 fn detail() -> MutexGuard<'static, Option<Detail>> {
     DETAIL.lock().unwrap_or_else(|e| e.into_inner())
@@ -131,7 +133,25 @@ pub fn set_name(name: &str) {
 }
 
 pub fn set_net(net: Net) {
+    let ip = match net {
+        Net::Up(ip) => u32::from(ip),
+        Net::Offline | Net::NotSet => 0,
+    };
+    IP.store(ip, Ordering::Relaxed);
     publish(|d| d.net = net);
+}
+
+/// The station's address, as the screen shows it: what the LazyTO relay task
+/// goes by to decide whether it is on the Wi-Fi.
+pub fn ip() -> Option<Ipv4Addr> {
+    match IP.load(Ordering::Relaxed) {
+        0 => None,
+        ip => Some(Ipv4Addr::from(ip)),
+    }
+}
+
+pub fn set_relay(found: bool) {
+    publish(|d| d.relay = found);
 }
 
 pub fn set_signal(weak: bool) {

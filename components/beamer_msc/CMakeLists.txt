@@ -2,7 +2,7 @@ idf_component_register(
     SRCS "beamer_msc.c" "beamer_panic.c" "beamer_tombstone.c" "beamer_wbc.c" "beamer_log.c" "beamer_fat.c" "beamer_oom.c"
     INCLUDE_DIRS "include"
     REQUIRES sdmmc fatfs vfs
-    PRIV_REQUIRES usb esp_timer driver espcoredump esp_system
+    PRIV_REQUIRES usb esp_timer driver espcoredump esp_system beamer_lazyto
 )
 
 idf_build_get_property(build_components BUILD_COMPONENTS)

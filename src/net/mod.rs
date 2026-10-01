@@ -3,6 +3,7 @@ pub mod check;
 pub mod gz;
 pub mod http;
 pub mod mdns;
+pub mod relay;
 mod transfer;
 pub mod wifi;
 
@@ -53,6 +54,11 @@ fn set_result(r: NetResult) {
 
 pub fn give_up() {
     down(NetResult::Fail);
+}
+
+/// Set once an eject or a restart has asked the network to stand down.
+pub fn stopping() -> bool {
+    SHUTDOWN.load(Ordering::Relaxed)
 }
 
 pub fn shut_down(timeout: Duration) -> bool {

@@ -3,6 +3,7 @@
  */
 
 #include "beamer_msc.h"
+#include "beamer_lazyto.h"
 
 #include <stdatomic.h>
 #include <string.h>
@@ -262,6 +263,16 @@ static int32_t transfer(bool write, uint32_t lba, uint32_t offset, void *buffer,
 
     atomic_int *const first = write ? &s_first_write_err : &s_first_err;
 
+    // LazyTO mailbox: served from RAM, never the card, the cache, the
+    // counters or the dirty flag (a mailbox write is not a config edit)
+    int32_t mailbox;
+    if (ssz == BEAMER_SECTOR_SIZE &&
+        beamer_lazyto_transfer(write, lba, start, (uint32_t)count, buffer, &mailbox))
+    {
+        s_last_cbw_us = esp_timer_get_time();
+        return mailbox;
+    }
+
     const uint32_t limit = visible_sectors();
     if (limit == 0 || start >= limit || (uint32_t)count > limit - start)
     {
@@ -445,6 +456,7 @@ static atomic_uint s_umounts;
 void tud_mount_cb(void)
 {
     atomic_fetch_add(&s_mounts, 1);
+    beamer_lazyto_host_reset();
     ESP_EARLY_LOGI(TAG, "host configured us");
 }
 
@@ -452,6 +464,7 @@ void tud_umount_cb(void)
 {
     atomic_fetch_add(&s_umounts, 1);
     atomic_store(&s_locked, false);
+    beamer_lazyto_host_reset();
     ESP_EARLY_LOGI(TAG, "host dropped us");
 }
 

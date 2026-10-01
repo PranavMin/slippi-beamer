@@ -1,4 +1,5 @@
 pub mod fat;
+pub mod mailbox;
 pub mod msc;
 pub mod volume;
 
