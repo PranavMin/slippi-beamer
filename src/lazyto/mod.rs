@@ -87,6 +87,14 @@ pub fn boot(window: &WriteWindow, sd: &SdCard, id: &StationId, settings: &Settin
     let cold = reset == esp_idf_svc::sys::esp_reset_reason_t_ESP_RST_POWERON && boots == 1;
     COLD.store(cold, Ordering::Relaxed);
 
+    // replays go out raw in LazyTO mode (net::transfer): the gzip arena's
+    // 15 KB go to the heap, which the relay link, the tables below and a
+    // download all draw on (hardware, 2026-10-08: about 28 KB free at idle
+    // without it, and a download ran the heap out)
+    if !unsafe { esp_idf_svc::sys::beamer_gz_donate_arena() } {
+        log::error!("LazyTO: the gzip arena stayed out of the heap");
+    }
+
     known::init();
     served::init();
     inventory::init();
