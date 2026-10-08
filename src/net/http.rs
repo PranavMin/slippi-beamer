@@ -94,9 +94,15 @@ pub fn serve(sd: Arc<SdCard>) -> anyhow::Result<EspHttpServer<'static>> {
         core: Some(Core::Core0),
         stack_size: 8192, // determined experimentally - lower panics...
         uri_match_wildcard: true,
-        // LazyTO mode: lwIP has two active TCP connections, and the beamer's
-        // relay link needs one of them when the kiosk reports a score
-        max_open_sockets: if crate::lazyto::enabled() { 1 } else { 2 },
+        // Two, in LazyTO mode too: with one, a connection arriving while a
+        // download held it (async, so never purged) left the listen socket
+        // readable and unaccepted, and this task (priority 5, core 0) spun
+        // on select for good, starving the transfer worker that would have
+        // freed it (hardware, 2026-10-08). With two, the second session is
+        // never async and LRU purge always has a victim. lwIP has four
+        // active TCP connections (sdkconfig.defaults): both of these, a
+        // backlogged one and the relay link.
+        max_open_sockets: 2,
         lru_purge_enable: true,
         ..Default::default()
     })?;

@@ -17,7 +17,7 @@ use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::{
-    CONFIG_LWIP_MAX_ACTIVE_TCP, CONFIG_LWIP_TCP_MSS, CONFIG_LWIP_TCP_SND_BUF_DEFAULT,
+    CONFIG_LWIP_TCP_MSS, CONFIG_LWIP_TCP_SND_BUF_DEFAULT,
 };
 
 use crate::config::Outcome;
@@ -102,7 +102,12 @@ pub fn retry_after_secs() -> u64 {
 
 const SEGMENT: u32 = (16 + 56 + CONFIG_LWIP_TCP_MSS + 4) + (16 + 4);
 pub const CONN_HEAP: u32 = (CONFIG_LWIP_TCP_SND_BUF_DEFAULT / CONFIG_LWIP_TCP_MSS) * SEGMENT;
-pub const HEAP_FLOOR: u32 = CONFIG_LWIP_MAX_ACTIVE_TCP * CONN_HEAP + 8 * 1024;
+/// Connections that carry a send buffer at once: a download and one other
+/// (a status request, or LazyTO's relay link). lwIP allows more active
+/// connections than this (sdkconfig.defaults), but the rest carry a request
+/// or a reply of a few hundred bytes.
+const BUSY_TCP: u32 = 2;
+pub const HEAP_FLOOR: u32 = BUSY_TCP * CONN_HEAP + 8 * 1024;
 
 pub const BLOCK_FLOOR: u32 = 3 * SEGMENT;
 

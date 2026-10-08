@@ -427,9 +427,12 @@ mode:
 
 In LazyTO mode `GET /SLIPPI/<name>` serves any replay on the card, not only this boot's newest
 `NUM-REPLAYS-SERVED`; `Range` and `X-Replay-From` are checked against the file itself. The live
-file is refused with `503` and `Retry-After`; an empty entry is `404`. HTTP keeps one socket
-(`max_open_sockets` 1): lwIP has two active TCP connections, and the relay link needs the other
-one when the kiosk reports a score while a replay downloads. Replays go out raw, never gzipped,
+file is refused with `503` and `Retry-After`; an empty entry is `404`. HTTP keeps upstream's two
+sockets, and lwIP has four active TCP connections: a download, a second HTTP session, one in the
+listen backlog and the relay link, which the kiosk needs when it reports a score while a replay
+downloads. With one HTTP socket a request that arrived during a download hung the station: the
+download's session is async and never purged, so the server spun on its unaccepted listen socket
+at priority 5 and starved the transfer worker on the same core. Replays go out raw, never gzipped,
 whatever `Accept-Encoding` asks: the gzip arena (15 KB) does not fit beside the relay link's
 buffers, and a download that ran the heap out stalled in send for good. `POST /reset-beamer` is refused
 (`403`): its wipe withdraws the medium under a mounted Wii, whose FatFs never notices.
@@ -525,8 +528,7 @@ USB bind, so no host holds the FAT:
 | One request's or sync's TCP socket, pcb and segments | ~5,000 | per request, freed when the relay closes |
 | The ack table read at a cold boot (up to 20 KB), and the erase's name lists | up to ~30,000 | at boot, before the bind, freed before it |
 
-LazyTO mode leaves out upstream's multicast announce socket (~1,500), and HTTP keeps one socket
-instead of two. Nothing is allocated per request by the firmware itself; lwIP's own allocations
+LazyTO mode leaves out upstream's multicast announce socket (~1,500). Nothing is allocated per request by the firmware itself; lwIP's own allocations
 fail softly (`BR_CONNECT`).
 
 Against mailbox v1 (`41c16d2`) built with the same toolchain: `.dram0.bss` +176 B, `.dram0.data`
