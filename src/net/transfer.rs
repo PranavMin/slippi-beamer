@@ -11,7 +11,8 @@ use esp_idf_svc::sys::{
     esp_err_t, httpd_handle_t, httpd_register_uri_handler, httpd_req_async_handler_begin,
     httpd_req_async_handler_complete, httpd_req_get_hdr_value_len, httpd_req_get_hdr_value_str,
     httpd_req_t, httpd_req_to_sockfd, httpd_resp_send, httpd_resp_send_chunk, httpd_resp_set_hdr,
-    httpd_resp_set_status, httpd_resp_set_type, httpd_sess_trigger_close, httpd_uri_t, ESP_OK,
+    httpd_resp_set_status, httpd_resp_set_type, httpd_sess_trigger_close, httpd_uri_t, lwip_recv,
+    lwip_setsockopt, socklen_t, timeval, ESP_OK, MSG_PEEK, SOL_SOCKET, SO_RCVTIMEO, SO_SNDTIMEO,
 };
 
 use crate::scan;
@@ -24,6 +25,8 @@ const STACK: usize = 6144;
 const MAX_NAME: usize = 96;
 const MAX_HDR: usize = 128;
 const WINDOW_WAIT: Duration = Duration::from_secs(2);
+const SEND_TIMEOUT: Duration = Duration::from_secs(20);
+const CLIENT_CLOSE_WAIT: Duration = Duration::from_secs(20);
 
 pub struct Job {
     req: *mut httpd_req_t,
@@ -98,10 +101,11 @@ fn worker(card: Arc<SdCard>) {
         };
 
         let raw = job.req;
-        if let Err(e) = run(&card, &job) {
-            log::error!("{}: transfer failed: {e}", job.name);
-        }
         let fd = unsafe { httpd_req_to_sockfd(raw) };
+        match run(&card, &job) {
+            Ok(()) => wait_for_client_close(fd),
+            Err(e) => log::error!("{}: transfer failed: {e}", job.name),
+        }
         unsafe { httpd_req_async_handler_complete(raw) };
         close_async_session(fd);
         drop(job);
@@ -143,6 +147,7 @@ fn check(rc: esp_err_t) -> anyhow::Result<()> {
 impl RawResponse {
     fn status(&self, s: &'static CStr) {
         unsafe { httpd_resp_set_status(self.0, s.as_ptr()) };
+        self.hdr(c"Connection", c"close"); // see wait_for_client_close
     }
 
     fn ctype(&self, t: &'static CStr) {
@@ -178,11 +183,54 @@ fn send_503(resp: &RawResponse, body: &[u8]) -> esp_err_t {
     resp.send(S_503, H_JSON, body)
 }
 
+fn set_timeout(fd: c_int, opt: u32, timeout: Duration) {
+    let tv = timeval {
+        tv_sec: timeout.as_secs() as _,
+        tv_usec: 0,
+    };
+    let rc = unsafe {
+        lwip_setsockopt(
+            fd,
+            SOL_SOCKET as c_int,
+            opt as c_int,
+            &tv as *const timeval as *const c_void,
+            core::mem::size_of::<timeval>() as socklen_t,
+        )
+    };
+    if rc != 0 {
+        log::warn!("could not set socket option {opt} on fd {fd}");
+    }
+}
+
+fn wait_for_client_close(fd: c_int) {
+    set_timeout(fd, SO_RCVTIMEO, CLIENT_CLOSE_WAIT);
+    let mut byte = 0u8;
+    let n = unsafe {
+        lwip_recv(
+            fd,
+            &mut byte as *mut u8 as *mut c_void,
+            1,
+            MSG_PEEK as c_int,
+        )
+    };
+    if n != 0 {
+        log::warn!(
+            "client did not close within {}s; closing anyway",
+            CLIENT_CLOSE_WAIT.as_secs()
+        );
+    }
+}
+
 fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
     use std::io::{Read as _, Seek as _, SeekFrom};
 
     let resp = RawResponse(job.req);
     let t_start = http::now_us();
+    set_timeout(
+        unsafe { httpd_req_to_sockfd(job.req) },
+        SO_SNDTIMEO,
+        SEND_TIMEOUT,
+    );
 
     let opened = match crate::storage::fat::ReadWindow::open_measured(card, WINDOW_WAIT) {
         Ok(Some(w)) => w,
