@@ -41,9 +41,11 @@ const BEACON_INTERVAL: Duration = Duration::from_millis(BEACON_INTERVAL_MS as u6
 const BEACON_STALE: Duration = Duration::from_secs(BEACON_STALE_S as u64);
 const BEACON_LEN: usize = size_of::<relay_beacon>();
 const AUTH: usize = size_of::<relay_auth>();
-/// The sync (building, signing, checking) runs here too, so more than the
-/// 4 KB the pipe alone had.
-const STACK: usize = 6144;
+/// The sync (building, signing, checking) runs here too, and so do its ack
+/// writes to NVS (a page buffer plus nvs_set_blob's own frames): 6 KB
+/// overflowed on the first sync that acked (hardware, 2026-10-08).
+/// `stack_left` logs the margin after every sync.
+const STACK: usize = 10240;
 
 const OK: u8 = beamer_result_BR_OK as u8;
 const NO_RELAY: u8 = beamer_result_BR_NO_RELAY as u8;
@@ -243,11 +245,19 @@ fn run(mut out: Vec<u8>, mut reply: Vec<u8>) {
         if let (Some(relay), Some(_), Some(secret)) = (relay, ip, secret) {
             if schedule.due() && !mailbox::request_pending() {
                 schedule.run(relay, &secret, &mut out, &mut reply);
+                log::info!("relay: stack {} B never used of {STACK}", stack_left());
             }
         }
     }
 
     log::info!("relay: standing down");
+}
+
+/// Bytes of this task's stack never touched so far (FreeRTOS's high-water
+/// mark; ESP-IDF counts stack in bytes).
+fn stack_left() -> u32 {
+    // SAFETY: a null handle means the calling task.
+    unsafe { esp_idf_svc::sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) }
 }
 
 fn refresh_beacon(b: &mut Beacon, have_ip: bool) {
