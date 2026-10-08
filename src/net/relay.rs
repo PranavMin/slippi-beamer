@@ -251,7 +251,11 @@ fn run(mut out: Vec<u8>, mut reply: Vec<u8>) {
 }
 
 fn refresh_beacon(b: &mut Beacon, have_ip: bool) {
-    if b.socket.is_none() && Instant::now() >= b.next_open {
+    // No socket before the station has an address: the net task brings lwIP
+    // up after this task starts, and a socket call before that trips lwIP's
+    // tcpip mbox assert (panic in task relay, first boot on hardware,
+    // 2026-10-07).
+    if b.socket.is_none() && have_ip && Instant::now() >= b.next_open {
         b.next_open = Instant::now() + BEACON_INTERVAL;
         b.socket = open_beacon();
     }
