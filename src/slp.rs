@@ -299,6 +299,26 @@ pub fn peek(buf: &[u8]) -> Result<Game, PeekError> {
     Ok(Game { live, ports })
 }
 
+/// Bytes from the start of a replay through its raw length.
+pub const HEADER_BYTES: usize = 15;
+
+/// The raw length a replay's header declares, or `None` if `head` (its
+/// first [`HEADER_BYTES`]) does not start like a replay. Slippi writes 0
+/// there until the game ends, then the length of the raw block; a file whose
+/// size covers `HEADER_BYTES` + that length is complete.
+pub fn raw_length(head: &[u8]) -> Option<u32> {
+    if head.len() < HEADER_BYTES || !head.starts_with(MAGIC) {
+        return None;
+    }
+    Some(u32::from_be_bytes([head[11], head[12], head[13], head[14]]))
+}
+
+/// Whether a file shorter than [`HEADER_BYTES`] starts like a replay.
+pub fn could_be_replay(head: &[u8]) -> bool {
+    let n = head.len().min(MAGIC.len());
+    head[..n] == MAGIC[..n]
+}
+
 pub fn peek_reader<R: std::io::Read>(mut r: R) -> std::io::Result<Result<Game, PeekError>> {
     let mut buf = [0u8; PEEK_BYTES];
     let mut n = 0;

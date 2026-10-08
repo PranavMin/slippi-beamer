@@ -53,6 +53,7 @@ fn set_result(r: NetResult) {
 }
 
 pub fn give_up() {
+    wifi::set_state(wifi::State::Radio);
     down(NetResult::Fail);
 }
 
@@ -132,6 +133,13 @@ impl Transfer {
         TRANSFERS.fetch_add(1, Ordering::Relaxed);
         Transfer
     }
+}
+
+/// A transfer whose size was not known when it began (LazyTO mode serves
+/// any file by name): its projected end, for `Retry-After`.
+pub fn project(bytes: u64) {
+    let projected_us = bytes * 1_000_000 / SPEED_BPS;
+    *FINISH_US.lock().unwrap_or_else(|e| e.into_inner()) = http::now_us() as u64 + projected_us;
 }
 
 impl Drop for Transfer {
@@ -217,6 +225,7 @@ fn run(modem: Modem<'static>, nvs: EspDefaultNvsPartition, sd: Arc<SdCard>, plan
     let sysloop = match EspSystemEventLoop::take() {
         Ok(l) => l,
         Err(e) => {
+            wifi::set_state(wifi::State::Radio);
             fail(
                 crate::status::ErrorLabel::RadioFailure,
                 &["the system event loop would not start", &format!("{e}")],
@@ -227,6 +236,7 @@ fn run(modem: Modem<'static>, nvs: EspDefaultNvsPartition, sd: Arc<SdCard>, plan
     };
 
     let Some(join) = plan.join else {
+        wifi::set_state(wifi::State::NoSsid);
         log::info!("no SSID configured: this station has no network");
         crate::status::set_net(crate::status::Net::NotSet);
         down(NetResult::Offline);
@@ -273,7 +283,11 @@ fn run(modem: Modem<'static>, nvs: EspDefaultNvsPartition, sd: Arc<SdCard>, plan
         ssid: Some(join.ssid.clone()),
     });
 
-    announce::open(&plan.station, &crate::name::current());
+    // LazyTO mode: the relay learns a beamer's address from its sync, so the
+    // multicast announces (and their socket) are left out
+    if !crate::lazyto::enabled() {
+        announce::open(&plan.station, &crate::name::current());
+    }
 
     if server.is_none() {
         set_result(NetResult::Fail);

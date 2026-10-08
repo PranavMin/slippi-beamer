@@ -344,7 +344,11 @@ impl<'d> Lcd<'d> {
         self.fill(0, 0, W, H, BLACK);
 
         match state {
-            State::Booting => {}
+            State::Booting => {
+                if let Some(left) = d.erasing {
+                    self.erasing(left);
+                }
+            }
             State::ErrorIdle | State::ErrorBusy => self.error(d),
             State::HealthyIdle | State::WarningIdle | State::HealthyBusy | State::WarningBusy => {
                 self.healthy(state, d)
@@ -508,6 +512,14 @@ impl<'d> Lcd<'d> {
         }
 
         self.blit(2, Self::ICON_Y, Self::ICON_BOX, Self::ICON_BOX);
+    }
+
+    /// LazyTO mode's cold-boot erase: DO NOT UNPLUG, in effect.
+    fn erasing(&mut self, left: u32) {
+        let mut line = Line::new();
+        line.push("ERASING ").push_num(left);
+        self.text_upper(line.as_str(), AMBER);
+        self.text(0, Self::LOWER_Y, W, 1, "DO NOT UNPLUG", WHITE);
     }
 
     fn error(&mut self, d: &Detail) {

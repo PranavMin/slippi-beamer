@@ -9,6 +9,9 @@
 //!     list runs as soon as a peek sees the game finish, on the same window
 //!     list runs on the next tick after a host write, if no game is live
 //!     list runs every [`LIST_BACKSTOP_TICKS`] as a backstop -- writes reset it
+//!
+//! In LazyTO mode the same task runs `lazyto::inventory` instead: uncapped,
+//! and it never freezes on a file left with raw length 0 (LAZYTO.md).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -122,8 +125,9 @@ pub fn spawn(sd: Arc<SdCard>, station: String, cap: usize, replay_cap: u32) -> a
     if let Some(s) = lock(&SET).as_mut() {
         s.init(station, cap);
     }
+    let lazyto = crate::lazyto::enabled();
     if let Some(t) = lock(&TRACKER).as_mut() {
-        t.sd = Some(sd);
+        t.sd = Some(sd.clone());
     }
 
     ThreadSpawnConfiguration {
@@ -135,7 +139,13 @@ pub fn spawn(sd: Arc<SdCard>, station: String, cap: usize, replay_cap: u32) -> a
     }
     .set()?;
 
-    std::thread::Builder::new().stack_size(8192).spawn(run)?;
+    if lazyto {
+        std::thread::Builder::new()
+            .stack_size(8192)
+            .spawn(move || run_lazyto(sd))?;
+    } else {
+        std::thread::Builder::new().stack_size(8192).spawn(run)?;
+    }
 
     ThreadSpawnConfiguration::default().set()?;
     Ok(())
@@ -175,6 +185,37 @@ fn run() {
         }
         drop(window);
         t.deliver(out);
+    }
+}
+
+fn run_lazyto(sd: Arc<SdCard>) {
+    let mut state = crate::lazyto::inventory::State::default();
+    loop {
+        std::thread::sleep(TICK);
+        if PARKED.load(Ordering::Relaxed) {
+            log::info!("scan: parked");
+            return;
+        }
+        crate::lazyto::inventory::tick(&sd, &mut state, || !PARKED.load(Ordering::Relaxed));
+    }
+}
+
+/// LazyTO's inventory: how many replays are on the card, for `/status`.
+pub fn set_replay_count(count: u32) {
+    lock(&FAST)
+        .get_or_insert_with(report::Fast::new)
+        .replay_count = count;
+}
+
+/// LazyTO's inventory: whether a game is being recorded (the BUSY readout).
+pub fn set_game_live(live: bool) {
+    GAME_LIVE.store(live, Ordering::Relaxed);
+}
+
+/// LazyTO's inventory: `/status`'s game, as upstream's scan publishes it.
+pub fn publish_game(game: &slp::Game, new_live: bool) {
+    if let Some(t) = lock(&TRACKER).as_mut() {
+        t.publish_game(game, new_live);
     }
 }
 

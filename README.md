@@ -53,7 +53,7 @@ Download, install, and open [Replay Reporter](https://github.com/jmlee337/replay
 
 ## Configuring a Beamer
 
-Station number is set with the button on the beamer - clicking goes up and, if you overshoot, holding the button will go down. Other configuration (most importantly wifi info) is set by editing `CONFIG/config.txt`. Keys are case-insensitive, blank lines and `#` comments are ignored, and values may be quoted.
+Station number is set with the button on the beamer - clicking goes up and, if you overshoot, holding the button will go down. (In LazyTO mode the number is kept across power-offs, and a new beamer shows "No station" until its first click.) Other configuration (most importantly wifi info) is set by editing `CONFIG/config.txt`. Keys are case-insensitive, blank lines and `#` comments are ignored, and values may be quoted.
 
 | Key                  | Default | What it does                                                                                                                                              |
 | -------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -66,7 +66,8 @@ Station number is set with the button on the beamer - clicking goes up and, if y
 | `LED-BRIGHTNESS`     | `20`    | The status LED brightness, 0 to 100 percent.                                                                                                              |
 | `FLIP-SCREEN`        | `false` | Whether the screen starts upside down. If you stand your Wii up, you probably want this.                                                                  |
 | `DEBUG`              | `false` | Debug mode. Don't use this unless you know what you're doing.                                                                                             |
-| `LAZYTO`             | `false` | LazyTO mode (this fork only): the Beamer carries a LazyTO Wii's relay traffic over its own Wi-Fi. Read at boot only. See [LAZYTO.md](LAZYTO.md).          |
+| `LAZYTO`             | `false` | LazyTO mode (this fork only): the Beamer carries a LazyTO Wii's relay traffic over its own Wi-Fi, keeps its station number in flash, and erases the replays the LazyTO laptop has collected at its next power-on. Read at boot only. See [LAZYTO.md](LAZYTO.md). |
+| `LAZYTO-SECRET`      | blank   | LazyTO mode only: the LazyTO relay's secret, 8 to 16 letters, digits, `-` or `_`. Never served or logged. Follows edits live.                                     |
 
 ## Learn More
 

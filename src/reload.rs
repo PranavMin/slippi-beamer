@@ -202,6 +202,19 @@ impl Watcher {
             log::info!("reload: LAZYTO is read at boot only; it takes effect on the next one");
         }
 
+        if next.secret != was.secret {
+            // the value is never logged
+            log::info!(
+                "reload: LAZYTO-SECRET {}",
+                if next.secret.is_some() {
+                    "changed"
+                } else {
+                    "removed"
+                }
+            );
+            crate::lazyto::set_secret(next.secret);
+        }
+
         if next != was {
             log::info!(
                 "reload: {} served, cap {}, LED {}, flipped {}",

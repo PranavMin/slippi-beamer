@@ -1,8 +1,10 @@
 //! LazyTO mode: the relay task. It finds the LazyTO relay on the LAN by its
 //! UDP beacon, and carries the Wii's requests and telemetry from the mailbox
-//! (`storage::mailbox`) to the relay and the answers back. A pure pipe: the
-//! bytes are never parsed, and the Wii has already put the relay's shared
-//! secret in them. See LAZYTO.md.
+//! (`storage::mailbox`) to the relay and the answers back. A pipe: it puts
+//! `relay_auth` (LAZYTO-SECRET) in front of what the Wii wrote and never
+//! parses the rest; the Wii holds no secret (mailbox v2, LazyTO's
+//! docs/protocol-v2.md). Between requests it runs the beamer's own sync
+//! (`lazyto::sync`).
 //!
 //! Runs only when `CONFIG/config.txt` sets `LAZYTO=true`. Its buffers are
 //! taken once, at boot; the response is read off the socket straight into
@@ -17,14 +19,18 @@ use std::time::{Duration, Instant};
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use esp_idf_svc::sys::lazyto::{
-    beamer_flags_BF_RELAY, beamer_flags_BF_WIFI, beamer_result_BR_BAD_REQ,
-    beamer_result_BR_CONNECT, beamer_result_BR_NO_RELAY, beamer_result_BR_NO_WIFI,
-    beamer_result_BR_OK, beamer_result_BR_TIMEOUT, beamer_result_BR_TOO_LARGE, relay_beacon,
-    BEACON_INTERVAL_MS, BEACON_PORT, RELAY_MAGIC_0, RELAY_MAGIC_1, RELAY_PROTO_VERSION,
-    TELEMETRY_PORT,
+    beamer_flags_BF_RELAY, beamer_flags_BF_SECRET, beamer_flags_BF_STATION_SET,
+    beamer_flags_BF_WIFI, beamer_result_BR_BAD_REQ, beamer_result_BR_CONNECT,
+    beamer_result_BR_NO_RELAY, beamer_result_BR_NO_SECRET, beamer_result_BR_NO_STATION,
+    beamer_result_BR_NO_WIFI, beamer_result_BR_OK, beamer_result_BR_TIMEOUT,
+    beamer_result_BR_TOO_LARGE, beamer_wifi_WIFI_UP, relay_auth, relay_beacon, AUTH_MAGIC_0,
+    AUTH_MAGIC_1, BEACON_INTERVAL_MS, BEACON_PORT, BEACON_STALE_S, RELAY_MAGIC_0, RELAY_MAGIC_1,
+    RELAY_PROTO_VERSION, TELEMETRY_PORT,
 };
 
-use crate::storage::mailbox::{self, Request};
+use crate::config::Secret;
+use crate::lazyto::sync;
+use crate::storage::mailbox::{self, Hello, Request};
 
 /// The whole round trip: connect, send, read to EOF. The Wii allows 3000 ms.
 const BUDGET: Duration = Duration::from_millis(2500);
@@ -32,8 +38,12 @@ const BUDGET: Duration = Duration::from_millis(2500);
 /// sector and the beacon socket are refreshed this often.
 const IDLE: Duration = Duration::from_millis(250);
 const BEACON_INTERVAL: Duration = Duration::from_millis(BEACON_INTERVAL_MS as u64);
+const BEACON_STALE: Duration = Duration::from_secs(BEACON_STALE_S as u64);
 const BEACON_LEN: usize = size_of::<relay_beacon>();
-const STACK: usize = 4096;
+const AUTH: usize = size_of::<relay_auth>();
+/// The sync (building, signing, checking) runs here too, so more than the
+/// 4 KB the pipe alone had.
+const STACK: usize = 6144;
 
 const OK: u8 = beamer_result_BR_OK as u8;
 const NO_RELAY: u8 = beamer_result_BR_NO_RELAY as u8;
@@ -42,6 +52,8 @@ const CONNECT: u8 = beamer_result_BR_CONNECT as u8;
 const TIMEOUT: u8 = beamer_result_BR_TIMEOUT as u8;
 const TOO_LARGE: u8 = beamer_result_BR_TOO_LARGE as u8;
 const BAD_REQ: u8 = beamer_result_BR_BAD_REQ as u8;
+const NO_STATION: u8 = beamer_result_BR_NO_STATION as u8;
+const NO_SECRET: u8 = beamer_result_BR_NO_SECRET as u8;
 
 const NO_RESULT: u8 = u8::MAX;
 
@@ -50,21 +62,34 @@ static RELAY_IP: AtomicU32 = AtomicU32::new(0);
 static RELAY_PORT: AtomicU16 = AtomicU16::new(0);
 static SERVED: AtomicU32 = AtomicU32::new(0);
 static LAST: AtomicU8 = AtomicU8::new(NO_RESULT);
+static BEACON_AGE: AtomicU16 = AtomicU16::new(u16::MAX);
+static TELE_DROPPED: AtomicU32 = AtomicU32::new(0);
 
-/// One request's or one datagram's bytes on their way out: whichever is
-/// larger, since the task handles one at a time. Taken from the heap once,
-/// at boot, so a station without LAZYTO does not pay for it.
-const SCRATCH: usize = if mailbox::TELE_MAX > mailbox::REQ_MAX {
-    mailbox::TELE_MAX
-} else {
-    mailbox::REQ_MAX
+/// One request's or one datagram's bytes on their way out, with
+/// `relay_auth` in front, or one sync request: whichever is largest, since
+/// the task does one at a time. Taken from the heap once, at boot, so a
+/// station without LAZYTO does not pay for it.
+const OUT: usize = {
+    let pipe = AUTH
+        + if mailbox::TELE_MAX > mailbox::REQ_MAX {
+            mailbox::TELE_MAX
+        } else {
+            mailbox::REQ_MAX
+        };
+    if sync::OUT_BYTES > pipe {
+        sync::OUT_BYTES
+    } else {
+        pipe
+    }
 };
 
 #[derive(Debug, Clone, Copy)]
 pub struct Snapshot {
     pub relay: Option<SocketAddrV4>,
+    pub beacon_age_s: Option<u16>,
     pub served: u32,
     pub last: Option<&'static str>,
+    pub telemetry_dropped: u32,
     pub mailbox: [(&'static str, u32); 7],
 }
 
@@ -76,11 +101,13 @@ pub fn snapshot() -> Option<Snapshot> {
     let m = mailbox::stats();
     Some(Snapshot {
         relay: relay(),
+        beacon_age_s: relay().map(|_| BEACON_AGE.load(Ordering::Relaxed)),
         served: SERVED.load(Ordering::Relaxed),
         last: match LAST.load(Ordering::Relaxed) {
             NO_RESULT => None,
             r => Some(result_name(r)),
         },
+        telemetry_dropped: TELE_DROPPED.load(Ordering::Relaxed),
         mailbox: [
             ("requests", m.requests),
             ("repeats", m.repeats),
@@ -93,6 +120,14 @@ pub fn snapshot() -> Option<Snapshot> {
     })
 }
 
+/// The last mailbox round trip's `beamer_result`; 0 before the first.
+pub fn last_result() -> u8 {
+    match LAST.load(Ordering::Relaxed) {
+        NO_RESULT => OK,
+        r => r,
+    }
+}
+
 pub fn result_name(result: u8) -> &'static str {
     match result {
         OK => "ok",
@@ -102,6 +137,8 @@ pub fn result_name(result: u8) -> &'static str {
         TIMEOUT => "timeout",
         TOO_LARGE => "too_large",
         BAD_REQ => "bad_req",
+        NO_STATION => "no_station",
+        NO_SECRET => "no_secret",
         _ => "unknown",
     }
 }
@@ -126,10 +163,11 @@ pub fn spawn() -> anyhow::Result<()> {
     }
     .set()?;
 
-    let out = vec![0u8; SCRATCH];
+    let out = vec![0u8; OUT];
+    let reply = vec![0u8; sync::IN_BYTES];
     let spawned = std::thread::Builder::new()
         .stack_size(STACK)
-        .spawn(move || run(out));
+        .spawn(move || run(out, reply));
 
     ThreadSpawnConfiguration::default().set()?;
     spawned?;
@@ -137,69 +175,129 @@ pub fn spawn() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run(mut out: Vec<u8>) {
-    let mut beacon: Option<UdpSocket> = None;
-    let mut next_open = Instant::now();
-    let mut next_ask = Instant::now();
+/// The beacon socket and when the relay was last heard.
+struct Beacon {
+    socket: Option<UdpSocket>,
+    next_open: Instant,
+    next_ask: Instant,
+    heard: Option<Instant>,
+}
+
+impl Beacon {
+    fn age(&self) -> Option<Duration> {
+        self.heard.map(|t| t.elapsed())
+    }
+
+    fn age_s(&self) -> u16 {
+        self.age()
+            .map_or(u16::MAX, |a| a.as_secs().min(u16::MAX as u64) as u16)
+    }
+}
+
+fn run(mut out: Vec<u8>, mut reply: Vec<u8>) {
+    let mut beacon = Beacon {
+        socket: None,
+        next_open: Instant::now(),
+        next_ask: Instant::now(),
+        heard: None,
+    };
     let mut found = false;
+    let mut schedule = sync::Schedule::new();
 
     log::info!("relay: listening for the beacon on udp {BEACON_PORT}");
 
     while !super::stopping() {
         let ip = crate::status::ip();
-
-        if beacon.is_none() && Instant::now() >= next_open {
-            next_open = Instant::now() + BEACON_INTERVAL;
-            beacon = open_beacon();
-        }
-        if let Some(socket) = beacon.as_ref() {
-            hear_beacons(socket);
-            if relay().is_none() && ip.is_some() && Instant::now() >= next_ask {
-                next_ask = Instant::now() + BEACON_INTERVAL;
-                ask_for_beacon(socket);
-            }
-        }
+        refresh_beacon(&mut beacon, ip.is_some());
 
         let relay = relay();
         if relay.is_some() != found {
             found = relay.is_some();
             crate::status::set_relay(found);
         }
-        let mut flags = 0u8;
-        if ip.is_some() {
-            flags |= beamer_flags_BF_WIFI as u8;
-        }
-        if relay.is_some() {
-            flags |= beamer_flags_BF_RELAY as u8;
-        }
-        mailbox::set_hello(flags, crate::name::number(), relay);
+        publish_hello(relay, &beacon);
 
         let events = mailbox::wait(IDLE);
-        if !events.request() && !events.telemetry() {
+        if events.request() || events.telemetry() {
+            // the wait may have been long: catch up before going out
+            if let Some(socket) = beacon.socket.as_ref() {
+                hear_beacons(socket, &mut beacon.heard);
+            }
+            let ip = crate::status::ip();
+            let relay = self::relay();
+            let secret = crate::lazyto::secret();
+
+            if events.telemetry() {
+                forward_telemetry(beacon.socket.as_ref(), ip, relay, secret.as_ref(), &mut out);
+            }
+            if events.request() {
+                if let Some(req) = mailbox::take_request(&mut out[AUTH..AUTH + mailbox::REQ_MAX]) {
+                    answer(&req, &mut out, ip, relay, secret.as_ref());
+                }
+            }
             continue;
         }
 
-        // the wait may have been long: catch up before going out
-        if let Some(socket) = beacon.as_ref() {
-            hear_beacons(socket);
-        }
-        let ip = crate::status::ip();
-        let relay = self::relay();
-
-        if events.telemetry() {
-            if let Some(n) = mailbox::take_telemetry(&mut out[..]) {
-                forward_telemetry(beacon.as_ref(), ip, relay, &out[..n]);
-            }
-        }
-
-        if events.request() {
-            if let Some(req) = mailbox::take_request(&mut out[..mailbox::REQ_MAX]) {
-                answer(&req, &out[..req.len], ip, relay);
+        // idle: the beamer's own sync, only while no request waits
+        let secret = crate::lazyto::secret();
+        if let (Some(relay), Some(_), Some(secret)) = (relay, ip, secret) {
+            if schedule.due() && !mailbox::request_pending() {
+                schedule.run(relay, &secret, &mut out, &mut reply);
             }
         }
     }
 
     log::info!("relay: standing down");
+}
+
+fn refresh_beacon(b: &mut Beacon, have_ip: bool) {
+    if b.socket.is_none() && Instant::now() >= b.next_open {
+        b.next_open = Instant::now() + BEACON_INTERVAL;
+        b.socket = open_beacon();
+    }
+    let Some(socket) = b.socket.as_ref() else {
+        return;
+    };
+    hear_beacons(socket, &mut b.heard);
+    // ask while no beacon reaches us: some access points drop broadcasts to
+    // a client, and the relay's unicast answer gets through
+    let quiet = b.age().is_none_or(|a| a > BEACON_STALE);
+    if quiet && have_ip && Instant::now() >= b.next_ask {
+        b.next_ask = Instant::now() + BEACON_INTERVAL;
+        ask_for_beacon(socket);
+    }
+    BEACON_AGE.store(b.age_s(), Ordering::Relaxed);
+}
+
+fn publish_hello(relay: Option<SocketAddrV4>, beacon: &Beacon) {
+    let wifi = crate::lazyto::wifi_state();
+    let station_set = crate::name::is_set();
+    let mut flags = 0u32;
+    if wifi as u32 == beamer_wifi_WIFI_UP {
+        flags |= beamer_flags_BF_WIFI;
+    }
+    if relay.is_some() {
+        flags |= beamer_flags_BF_RELAY;
+    }
+    if station_set {
+        flags |= beamer_flags_BF_STATION_SET;
+    }
+    if crate::lazyto::secret().is_some() {
+        flags |= beamer_flags_BF_SECRET;
+    }
+    mailbox::set_hello(&Hello {
+        flags: flags as u8,
+        station: if station_set {
+            crate::name::number()
+        } else {
+            0
+        },
+        relay,
+        wifi,
+        storage: crate::lazyto::storage_state(),
+        last_result: last_result(),
+        beacon_age_s: if relay.is_some() { beacon.age_s() } else { 0 },
+    });
 }
 
 fn open_beacon() -> Option<UdpSocket> {
@@ -218,7 +316,7 @@ fn open_beacon() -> Option<UdpSocket> {
     }
 }
 
-fn hear_beacons(socket: &UdpSocket) {
+fn hear_beacons(socket: &UdpSocket, heard: &mut Option<Instant>) {
     let mut buf = [0u8; BEACON_LEN + 1]; // one spare byte, so an oversized datagram shows
     loop {
         let (n, from) = match socket.recv_from(&mut buf) {
@@ -236,6 +334,7 @@ fn hear_beacons(socket: &UdpSocket) {
             continue;
         };
 
+        *heard = Some(Instant::now());
         let ip = u32::from(*from.ip());
         if RELAY_IP.load(Ordering::Relaxed) != ip || RELAY_PORT.load(Ordering::Relaxed) != port {
             log::info!("relay: found at {}:{port}", from.ip());
@@ -245,15 +344,13 @@ fn hear_beacons(socket: &UdpSocket) {
     }
 }
 
-/// The relay's TCP port, if `b` is a valid `relay_beacon`.
+/// The relay's TCP port, if `b` is a valid `relay_beacon`: exactly its
+/// length, its magic, and a nonzero port. Its version is never compared, so
+/// a protocol bump never strands a beamer (dongles have no over-the-air
+/// update).
 fn beacon_port(b: &[u8]) -> Option<u16> {
-    let version = offset_of!(relay_beacon, version);
     let port = offset_of!(relay_beacon, tcp_port);
-    if b.len() != BEACON_LEN
-        || b[0] != RELAY_MAGIC_0
-        || b[1] != RELAY_MAGIC_1
-        || b[version] != RELAY_PROTO_VERSION as u8
-    {
+    if b.len() != BEACON_LEN || b[0] != RELAY_MAGIC_0 || b[1] != RELAY_MAGIC_1 {
         return None;
     }
     let port = u16::from_be_bytes([b[port], b[port + 1]]);
@@ -261,8 +358,8 @@ fn beacon_port(b: &[u8]) -> Option<u16> {
 }
 
 /// The beacon request: a `relay_beacon` with tcp_port and event_id 0,
-/// broadcast to the relay's telemetry port. Some access points never pass
-/// the relay's broadcasts on; its unicast answer gets through.
+/// broadcast to the relay's telemetry port. The relay answers it whatever
+/// its version.
 fn ask_for_beacon(socket: &UdpSocket) {
     let mut b = [0u8; BEACON_LEN];
     b[0] = RELAY_MAGIC_0;
@@ -274,30 +371,64 @@ fn ask_for_beacon(socket: &UdpSocket) {
     }
 }
 
+/// `relay_auth` for `secret`, into the first `AUTH` bytes of `out`.
+fn put_auth(out: &mut [u8], secret: &Secret) {
+    out[..AUTH].fill(0);
+    out[offset_of!(relay_auth, magic)] = AUTH_MAGIC_0 as u8;
+    out[offset_of!(relay_auth, magic) + 1] = AUTH_MAGIC_1 as u8;
+    let at = offset_of!(relay_auth, secret);
+    out[at..at + secret.padded().len()].copy_from_slice(secret.padded());
+}
+
+/// One telemetry datagram: `relay_auth` + what the kernel wrote, to the
+/// relay's telemetry port. Dropped without a number or a secret (the relay
+/// would take an unnumbered station for Dolphin's station 0), or without
+/// the Wi-Fi or a relay: best effort, as on the Wii's own network.
 fn forward_telemetry(
     socket: Option<&UdpSocket>,
     ip: Option<Ipv4Addr>,
     relay: Option<SocketAddrV4>,
-    datagram: &[u8],
+    secret: Option<&Secret>,
+    out: &mut [u8],
 ) {
-    let (Some(socket), Some(_), Some(relay)) = (socket, ip, relay) else {
-        return; // best effort, as on the Wii's own network
+    let Some(n) = mailbox::take_telemetry(&mut out[AUTH..AUTH + mailbox::TELE_MAX]) else {
+        return;
     };
+    let (Some(socket), Some(_), Some(relay), Some(secret), true) =
+        (socket, ip, relay, secret, crate::name::is_set())
+    else {
+        TELE_DROPPED.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    put_auth(out, secret);
     let to = SocketAddrV4::new(*relay.ip(), TELEMETRY_PORT as u16);
-    if let Err(e) = socket.send_to(datagram, to) {
+    if let Err(e) = socket.send_to(&out[..AUTH + n], to) {
         log::debug!("relay: telemetry not sent: {e}");
     }
 }
 
-fn answer(req: &Request, bytes: &[u8], ip: Option<Ipv4Addr>, relay: Option<SocketAddrV4>) {
+/// One request: `out` holds the Wii's bytes at `AUTH..`; refused locally
+/// when the beamer cannot send it, else `relay_auth` goes in front.
+fn answer(
+    req: &Request,
+    out: &mut [u8],
+    ip: Option<Ipv4Addr>,
+    relay: Option<SocketAddrV4>,
+    secret: Option<&Secret>,
+) {
     let start = Instant::now();
     let (result, len) = mailbox::respond(req, |body| {
         if req.bad {
             (BAD_REQ, 0)
+        } else if !crate::name::is_set() {
+            (NO_STATION, 0)
+        } else if secret.is_none() {
+            (NO_SECRET, 0)
         } else if ip.is_none() {
             (NO_WIFI, 0)
-        } else if let Some(relay) = relay {
-            round_trip(relay, bytes, body)
+        } else if let (Some(relay), Some(secret)) = (relay, secret) {
+            put_auth(out, secret);
+            round_trip(relay, &out[..AUTH + req.len], body)
         } else {
             (NO_RELAY, 0)
         }

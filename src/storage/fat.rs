@@ -1,10 +1,11 @@
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use esp_idf_svc::sys::{
-    beamer_fat_ro_register, esp, esp_vfs_fat_register, esp_vfs_fat_unregister_path, f_mount,
-    ff_diskio_get_drive, ff_diskio_register, ff_diskio_register_sdmmc, EspError, FATFS,
+    beamer_fat_ro_register, esp, esp_vfs_fat_register, esp_vfs_fat_unregister_path, f_closedir,
+    f_mount, f_opendir, f_readdir, f_stat, ff_diskio_get_drive, ff_diskio_register,
+    ff_diskio_register_sdmmc, EspError, FATFS, FF_DIR, FILINFO,
 };
 
 unsafe fn ff_diskio_release(pdrv: u8) {
@@ -22,6 +23,7 @@ struct Mount {
     pdrv: u8,
     base: CString,
     drive: CString,
+    fs: *mut FATFS,
 }
 
 impl Mount {
@@ -60,7 +62,12 @@ impl Mount {
             >());
         }
 
-        Ok(Mount { pdrv, base, drive })
+        Ok(Mount {
+            pdrv,
+            base,
+            drive,
+            fs,
+        })
     }
 }
 
@@ -74,7 +81,7 @@ impl Drop for Mount {
     }
 }
 
-pub struct WriteWindow(#[allow(dead_code)] Mount);
+pub struct WriteWindow(Mount);
 
 impl WriteWindow {
     pub fn open(sd: &SdCard) -> Result<WriteWindow, EspError> {
@@ -84,6 +91,95 @@ impl WriteWindow {
         })
         .map(WriteWindow)
     }
+
+    /// `rel` as FatFs itself names it on this window's drive (`0:/SLIPPI`),
+    /// for the FatFs calls below.
+    pub fn fat_path(&self, rel: &str) -> CString {
+        fat_path(&self.0.drive, rel)
+    }
+
+    /// The volume's first sector on the card (its boot sector).
+    pub fn volume_base(&self) -> u32 {
+        // SAFETY: the mount is live as long as the window
+        unsafe { (*self.0.fs).volbase }
+    }
+}
+
+fn fat_path(drive: &CStr, rel: &str) -> CString {
+    let drive = drive.to_str().unwrap_or("0:");
+    CString::new(format!("{drive}/{rel}")).expect("no interior NUL")
+}
+
+/// One directory entry, as FatFs reads it: the FAT date and time with it,
+/// which the VFS's `stat` turns into a `time_t`.
+pub struct FatEntry<'a> {
+    pub name: &'a str,
+    pub size: u32,
+    pub fdate: u16,
+    pub ftime: u16,
+    pub dir: bool,
+}
+
+const AM_DIR: u8 = 0x10;
+
+/// Walks the directory `path` (a [`WriteWindow::fat_path`] or
+/// [`ReadWindow::fat_path`]) with FatFs directly: no `stat` per entry.
+/// Errors are FatFs's FRESULT.
+pub fn for_each_entry(path: &CStr, mut f: impl FnMut(&FatEntry<'_>)) -> Result<(), u32> {
+    // SAFETY: FatFs fills both; all-zero is their documented initial state
+    let mut dir: FF_DIR = unsafe { core::mem::zeroed() };
+    let mut fno: FILINFO = unsafe { core::mem::zeroed() };
+    let res = unsafe { f_opendir(&mut dir, path.as_ptr()) };
+    if res != 0 {
+        return Err(res as u32);
+    }
+    let out = loop {
+        let res = unsafe { f_readdir(&mut dir, &mut fno) };
+        if res != 0 {
+            break Err(res as u32);
+        }
+        if fno.fname[0] == 0 {
+            break Ok(());
+        }
+        // SAFETY: FatFs NUL-terminates fname
+        let name = unsafe { CStr::from_ptr(fno.fname.as_ptr()) };
+        let Ok(name) = name.to_str() else { continue };
+        f(&FatEntry {
+            name,
+            size: fno.fsize as u32,
+            fdate: fno.fdate,
+            ftime: fno.ftime,
+            dir: fno.fattrib & AM_DIR != 0,
+        });
+    };
+    unsafe { f_closedir(&mut dir) };
+    out
+}
+
+/// One file's size and FAT modified date and time, or `None` if it is not
+/// there.
+pub fn stat(path: &CStr) -> Option<(u32, u16, u16)> {
+    let mut fno: FILINFO = unsafe { core::mem::zeroed() };
+    (unsafe { f_stat(path.as_ptr(), &mut fno) } == 0).then_some((
+        fno.fsize as u32,
+        fno.fdate,
+        fno.ftime,
+    ))
+}
+
+/// Where the FAT lies on the card, from the mounted volume.
+#[derive(Debug, Clone, Copy)]
+pub struct FatGeometry {
+    /// FS_FAT16 2, FS_FAT32 3
+    pub fs_type: u8,
+    /// first sector of the first FAT
+    pub fat_base: u32,
+    /// sectors per FAT
+    pub fat_sectors: u32,
+    /// clusters + 2
+    pub entries: u32,
+    /// sectors per cluster
+    pub cluster_sectors: u32,
 }
 
 struct Gate {
@@ -241,6 +337,29 @@ impl ReadWindow {
 
     pub fn path(&self, rel: &str) -> String {
         format!("{RO_BASE_PATH}/{rel}")
+    }
+
+    /// `rel` as FatFs itself names it (`1:/SLIPPI/x.slp`), for
+    /// [`for_each_entry`] and [`stat`].
+    pub fn fat_path(&self, rel: &str) -> CString {
+        match RO_VOLUME.get() {
+            Some(vol) => fat_path(&vol.drive, rel),
+            None => CString::new(rel).expect("no interior NUL"),
+        }
+    }
+
+    /// The FAT's place and size, as this mount read them.
+    pub fn geometry(&self) -> Option<FatGeometry> {
+        let vol = RO_VOLUME.get()?;
+        // SAFETY: the window holds the mount
+        let fs = unsafe { &*vol.fs };
+        Some(FatGeometry {
+            fs_type: fs.fs_type,
+            fat_base: fs.fatbase,
+            fat_sectors: fs.fsize,
+            entries: fs.n_fatent,
+            cluster_sectors: fs.csize as u32,
+        })
     }
 
     fn mount(held: Held) -> Result<ReadWindow, EspError> {

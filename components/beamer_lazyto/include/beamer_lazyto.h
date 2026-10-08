@@ -8,9 +8,9 @@
  * gives a semaphore. The relay task (src/net/relay.rs, core 0) does all the
  * network work through the functions below.
  *
- * The mailbox's buffers (about 5.5 KB) are taken from the heap once, by
- * beamer_lazyto_install at boot, and only in LazyTO mode; nothing is
- * allocated afterwards.
+ * The mailbox's buffers (about 5.8 KB, with the two SHA-256 contexts) are
+ * taken from the heap once, by beamer_lazyto_install at boot, and only in
+ * LazyTO mode; nothing is allocated afterwards.
  */
 #pragma once
 
@@ -25,8 +25,10 @@ extern "C"
 {
 #endif
 
-/* The beamer firmware's LazyTO build number, sent in beamer_hello.fw_build. */
-#define BEAMER_LAZYTO_FW_BUILD 1
+/* The beamer firmware's LazyTO build number, sent in beamer_hello.fw_build
+ * and beamer_sync_req.fw_build. 2: mailbox v2, the beacon checked by magic
+ * and length, the scan fix, the sync (at least BEAMER_FW_MIN). */
+#define BEAMER_LAZYTO_FW_BUILD 2
 
 /* Payload bytes after each header. Checked against relay_proto.h in
  * beamer_lazyto.c, written out so bindgen can see them. */
@@ -37,6 +39,12 @@ extern "C"
 /* Bits returned by beamer_lazyto_wait. */
 #define BEAMER_LAZYTO_EV_REQUEST 1u
 #define BEAMER_LAZYTO_EV_TELEMETRY 2u
+
+/* SHA-256 contexts: one for the replay being served (transfer task), one for
+ * the sync signature (relay task). */
+#define BEAMER_LAZYTO_SHA_SERVE 0u
+#define BEAMER_LAZYTO_SHA_SYNC 1u
+#define BEAMER_LAZYTO_SHA_SLOTS 2u
 
     typedef struct
     {
@@ -49,6 +57,20 @@ extern "C"
         uint32_t stale;      /* responses dropped because the host re-enumerated meanwhile */
     } beamer_lazyto_stats_t;
 
+    /* The live fields of beamer_hello (relay_proto.h); magic, version and
+     * fw_build are fixed. Native integers here; the sector is big-endian. */
+    typedef struct
+    {
+        uint8_t flags;         /* beamer_flags bits */
+        uint16_t station;      /* valid with BF_STATION_SET */
+        uint32_t relay_ip;     /* a.b.c.d as (a << 24) | (b << 16) | (c << 8) | d; 0 = unknown */
+        uint16_t relay_port;   /* 0 = unknown */
+        uint8_t wifi;          /* enum beamer_wifi */
+        uint8_t storage;       /* enum beamer_storage */
+        uint8_t last_result;   /* enum beamer_result of the last round trip */
+        uint16_t beacon_age_s; /* valid with BF_RELAY */
+    } beamer_lazyto_hello_t;
+
     /* Turns the mailbox on at LBA `first` (the replay partition's end). Call
      * once, before beamer_msc_install, and raise the visible size to
      * first + BEAMER_MB_SECTORS yourself. Until this is called every host
@@ -57,20 +79,23 @@ extern "C"
     bool beamer_lazyto_install(uint32_t first);
     bool beamer_lazyto_installed(void);
 
-    /* HELLO fields. relay_ip is in network order as four octets a.b.c.d packed
-     * as (a << 24) | (b << 16) | (c << 8) | d; 0 means unknown. */
-    void beamer_lazyto_set_hello(uint8_t flags, uint16_t station, uint32_t relay_ip,
-                                 uint16_t relay_port);
+    /* HELLO's live fields. */
+    void beamer_lazyto_set_hello(const beamer_lazyto_hello_t *hello);
 
     /* Blocks up to timeout_ms for the host to hand over something new.
      * Returns the BEAMER_LAZYTO_EV_* bits pending (0 on timeout). */
     uint32_t beamer_lazyto_wait(uint32_t timeout_ms);
 
+    /* Whether a request is waiting to be taken: the relay task's own sync
+     * gives way to it. */
+    bool beamer_lazyto_request_pending(void);
+
     /* Takes the pending request: copies its bytes (at most
-     * BEAMER_LAZYTO_REQ_MAX) into out and returns how many, or -1 if none is
-     * pending. *bad is set when the sector was malformed; the caller then
-     * answers BR_BAD_REQ for *seq without contacting the relay. *gen
-     * identifies the host session, and goes back with the response. */
+     * BEAMER_LAZYTO_REQ_MAX: relay_hdr + payload, no relay_auth) into out and
+     * returns how many, or -1 if none is pending. *bad is set when the sector
+     * was malformed; the caller then answers BR_BAD_REQ for *seq without
+     * contacting the relay. *gen identifies the host session, and goes back
+     * with the response. */
     int32_t beamer_lazyto_take_request(uint8_t *out, size_t cap, uint32_t *seq, uint32_t *gen,
                                        bool *bad);
 
@@ -86,10 +111,23 @@ extern "C"
     uint8_t *beamer_lazyto_resp_begin(void);
     void beamer_lazyto_resp_commit(uint32_t gen, uint32_t seq, uint8_t result, size_t len);
 
-    /* Takes the pending telemetry datagram, as beamer_lazyto_take_request. */
+    /* Takes the pending telemetry datagram (telemetry_hdr + payload, no
+     * relay_auth), as beamer_lazyto_take_request. */
     int32_t beamer_lazyto_take_telemetry(uint8_t *out, size_t cap);
 
     void beamer_lazyto_stats(beamer_lazyto_stats_t *out);
+
+    /* SHA-256 on the ESP32-S3's SHA accelerator (mbedtls with
+     * CONFIG_MBEDTLS_HARDWARE_SHA). One computation per slot at a time;
+     * different slots may run on different tasks. False when the mailbox
+     * is not installed (its heap block holds the contexts). */
+    bool beamer_lazyto_sha_begin(uint32_t slot);
+    void beamer_lazyto_sha_update(uint32_t slot, const uint8_t *data, size_t len);
+    void beamer_lazyto_sha_finish(uint32_t slot, uint8_t out[32]);
+
+    /* Fills out with random bytes from the hardware RNG (true random once
+     * the radio is on). */
+    void beamer_lazyto_random(uint8_t *out, size_t len);
 
     /* --- for beamer_msc.c only ----------------------------------------- */
 

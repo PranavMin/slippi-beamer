@@ -6,6 +6,7 @@
 //! errors off of NVS and onto the disk at LOGS/error.txt. mirror() rewrites
 //! that file whenever when a boot has errors.
 use core::fmt::Write as _;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
@@ -52,6 +53,20 @@ static STORE: Mutex<Store> = Mutex::new(Store {
 
 static CURRENT: Mutex<Option<ErrorLabel>> = Mutex::new(None);
 
+/// Every label raised and not resolved, one bit each: the screen shows one
+/// error at a time, but LazyTO's hello reports the card's state whichever
+/// error the screen shows.
+static STANDING: AtomicU32 = AtomicU32::new(0);
+
+fn bit(label: ErrorLabel) -> u32 {
+    1 << (label as u32)
+}
+
+/// Whether `label` has been raised and not resolved.
+pub fn standing(label: ErrorLabel) -> bool {
+    STANDING.load(Ordering::Relaxed) & bit(label) != 0
+}
+
 fn store() -> MutexGuard<'static, Store> {
     STORE.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -92,6 +107,7 @@ pub fn error(target: Target, label: ErrorLabel, component: &str, lines: &[&str])
     let Some((head, rest)) = lines.split_first() else {
         return;
     };
+    STANDING.fetch_or(bit(label), Ordering::Relaxed);
 
     let mut s = store();
     let head_line = format!("[{component}] {head}");
@@ -176,6 +192,7 @@ fn show(label: ErrorLabel, head: &str, more: u32) {
 }
 
 pub fn resolve(label: ErrorLabel) {
+    STANDING.fetch_and(!bit(label), Ordering::Relaxed);
     let mut cur = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
     if *cur != Some(label) {
         return;

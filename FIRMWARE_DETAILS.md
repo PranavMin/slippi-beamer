@@ -102,7 +102,7 @@ Everything else is strictly read-only and re-reads the FAT rather than caching a
 | `beamer_wbc.c` `s_stack`     |       4,096 | `beamer_wbc` flush task stack                                                                                                                                                                            |
 | `beamer_wbc.c` `s_meta`      |         384 | 32 slot descriptors                                                                                                                                                                                      |
 | `volume.rs` `WIPE_BATCH`     |       2,048 | 8 replay names for`POST /reset-beamer`, so the wipe does not build a list of every replay on the heap                                                                                                    |
-| `beamer_lazyto.c` and `relay.rs` |    ~240 | the LazyTO mailbox's fixed state: HELLO, seqs, counters, the wake semaphore. Its buffers are taken at boot and only in LazyTO mode (below), so `LAZYTO=false` costs just this                                |
+| `beamer_lazyto.c`, `relay.rs`, `src/lazyto/` |    ~560 | LazyTO mode's fixed state: HELLO, seqs, counters, the wake semaphore, the secret, the sync, ack and erase state. Its buffers are taken at boot and only in LazyTO mode (below), so `LAZYTO=false` costs just this |
 | everything else              |       4,239 |                                                                                                                                                                                                          |
 | **Total**                    | **151 KiB** |                                                                                                                                                                                                          |
 
@@ -120,7 +120,7 @@ Everything else is strictly read-only and re-reads the FAT rather than caching a
 | The read window's FatFs registration                                                                                                                                                                                         |        2,220 |
 | The rendered reset census, two short lines held for the boot                                                                                                                                                                 |         ~250 |
 | Journal drain task (only when`DEBUG=true`)                                                                                                                                                                                   |        8,192 |
-| LazyTO mode (only when `LAZYTO=true`): the mailbox's sector buffers 5,620 (`beamer_lazyto.c`: request 512, telemetry 1,024, response 4,084), the relay task's stack 4,096 and outgoing scratch 1,012, its UDP socket ~500   |      ~11,200 |
+| LazyTO mode (only when `LAZYTO=true`): the mailbox's sector buffers 5,620 (`beamer_lazyto.c`: request 512, telemetry 1,024, response 4,084) and two SHA-256 contexts 224, the relay task's stack 6,144 and buffers 2,140 (a request, datagram or sync out; a sync reply), its UDP socket ~500, the known-files table 8,192 (1,024 keys), the served-hash table ~1,800 and the inventory's snapshot ~1,200. It leaves out the multicast socket (~1,500). At boot only, before the bind, the cold-boot erase reads the ack table (up to 20 KB) and frees it | ~24,300 |
 | **Total**                                                                                                                                                                                                                    | **~125 KiB** |
 
 #### Allocated by lwIP
@@ -132,7 +132,7 @@ Everything else is strictly read-only and re-reads the FAT rather than caching a
 | **Both sockets,`max_open_sockets` = 2**        | **18,432** | what serving actually costs, since replay bytes fill every segment       |
 | The WiFi driver's copy of each of those frames |     19,560 | ~1,630 B per frame,`MALLOC_CAP_INTERNAL\|DMA\|8BIT`, taken on demand     |
 | **Peak in flight**                             | **37,992** | every byte in flight is buffered twice, once each side of the driver     |
-| LazyTO: one relay request                      |    ~5,000 | a socket and pcb, the request's one segment, and up to 3 segments of reply waiting to be read; all freed when the relay closes. `LWIP_MAX_ACTIVE_TCP` = 2, so the connect fails (`BR_CONNECT`) while both HTTP sockets are open |
+| LazyTO: one relay request or sync              |    ~5,000 | a socket and pcb, the request's one segment, and up to 3 segments of reply waiting to be read; all freed when the relay closes. `LWIP_MAX_ACTIVE_TCP` = 2, and HTTP keeps one socket in LazyTO mode, so the relay link always has the other |
 
 #### Summary
 
@@ -145,7 +145,7 @@ Everything else is strictly read-only and re-reads the FAT rather than caching a
 | ...left for the heap                  |    187 KiB |
 | Allocated once at boot,`DEBUG=false`  |   ~117 KiB |
 | ...`DEBUG=true`                       |   ~125 KiB |
-| ...`LAZYTO=true` adds                 |    ~11 KiB |
+| ...`LAZYTO=true` adds                 |    ~24 KiB |
 | Allocated by lwIP while serving       |   9-18 KiB |
 | Free heap at rest                     |    ~59 KiB |
 | Free heap while serving               | ~25-45 KiB |
@@ -173,6 +173,8 @@ Card errors aren't passed immediately back to the host. A failed card write stay
 #### The LazyTO mailbox
 
 With `LAZYTO=true` the host sees 16 more sectors than the replay partition, and `transfer()` in `beamer_msc.c` serves those from RAM before the visible-size check and the write-back cache: they never reach the card, so the FAT rule above still holds. They do not count as reads or writes for the `BUSY` blink, and a write there is not a config edit. The layout, the round trip and the memory ordering are in [LAZYTO.md](LAZYTO.md).
+
+LazyTO mode adds one write to the card, in the first window: at a cold boot (power-on, first boot since power was applied), before the bind, it deletes 0-byte replay entries and the replays the LazyTO laptop holds, for at most 4 s (LAZYTO.md, "The cold-boot erase"). Its station number and acks live in the `lazyto` namespace of the `jrnl` NVS partition.
 
 #### FreeRTOS tasks
 

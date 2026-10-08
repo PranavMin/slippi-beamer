@@ -516,7 +516,9 @@ impl Summary {
     }
 }
 
-fn partition() -> Option<EspNvsPartition<NvsCustom>> {
+/// The `jrnl` NVS partition, taken once; LazyTO mode keeps its own namespace
+/// on it (`lazyto::store`).
+pub(crate) fn partition() -> Option<EspNvsPartition<NvsCustom>> {
     static PART: std::sync::OnceLock<Option<EspNvsPartition<NvsCustom>>> =
         std::sync::OnceLock::new();
     PART.get_or_init(|| match EspNvsPartition::<NvsCustom>::take(PARTITION) {

@@ -7,7 +7,7 @@ All responses are JSON. There is no authentication: anyone who can reach the sta
 | `GET`  | `/status`        | The last status report, straight off the two fragments. Runs nothing, so poll it freely. |
 | `GET`  | `/SLIPPI/`       | Index of the replays this station is currently serving.                                  |
 | `GET`  | `/SLIPPI/<file>` | The replay itself.                                                                       |
-| `POST` | `/reset-beamer`  | Wipes the replay drive. Requires`X-Beamer-Confirm: reset`.                               |
+| `POST` | `/reset-beamer`  | Wipes the replay drive. Requires`X-Beamer-Confirm: reset`. Refused (`403`) in LazyTO mode. |
 
 Setting `DEBUG` can sometimes add endpoints under `/debug/` - they're intentionally undocumented and unsupported. If you want to read the code and use them تَفَضَّلِي, but don't rely on them keeping the same shape or even existing on a new release.
 
@@ -59,10 +59,17 @@ Everything here is cached by the scan tick so this `GET` is very cheap - **it's 
   "secs_since_port_change": null, # how long have just these ports been in use
   "secs_since_character_change": null, # how long has this ports+characters combo been in use
   "secs_since_game_start": null, # how many seconds since the last game start
-  # only with LAZYTO=true (this fork, see LAZYTO.md); absent otherwise:
-  "lazyto": {"relay": "192.168.1.20:29470", "requests_served": 12, "last_result": "ok",
-             "mailbox": {"requests": 12, "repeats": 0, "malformed": 0, "telemetry": 40,
-                         "telemetry_bad": 0, "refused": 0, "stale": 0}},
+  # only with LAZYTO=true (this fork, see LAZYTO.md); absent otherwise.
+  # "secret" says whether LAZYTO-SECRET is set: the secret itself is never shown.
+  "lazyto": {"fw_build": 2, "station_set": true, "secret": true, "wifi": "up", "storage": "ok",
+    "relay": "192.168.1.20:29470", "beacon_age_s": 1, "requests_served": 12, "last_result": "ok", "telemetry_dropped": 0,
+    "mailbox": {"requests": 12, "repeats": 0, "malformed": 0, "telemetry": 40, "telemetry_bad": 0, "refused": 0, "stale": 0},
+    "inventory": {"on_card": 9, "to_collect": 2, "to_erase": 7, "empty": 0, "incomplete": 0, "acks": 7}, "free_mb": 3790, "card_mb": 4093, "used_mb": 61,
+    "erase": {"erased": 31, "erased_empty": 1, "erase_ms": 2140, "erase_left": 0, "cold": true, "failed": false, "acks_dropped": false},
+    "sync": {"attempts": 40, "ok": 40, "acked": 7, "last": "ok", "last_age_s": 12}},
+  # wifi: up, joining, no_ssid, cant_join, no_address, radio
+  # storage: ok, no_card, unreadable, write_failed, wrong_format, filling, full
+  # inventory is null until the first walk of the card; free_mb is null until the FAT is counted
   "health": "ok", # ok, starting, warn, or errror
   "warnings": []
   # note the lack of "errors" array - "health": "error" says you gotta walk up to the beamer anyway!
@@ -96,6 +103,8 @@ A few notes:
 
 A few notes:
 
+- In LazyTO mode any replay on the card is served by name, not only those in `GET /SLIPPI/` (which stays empty in that mode). The file being recorded right now is refused with `503` and a `Retry-After`; a 0-byte entry is `404`.
+
 - Accepts `Accept-Encoding: gzip` (body comes back `Content-Encoding: gzip` with no `Content-Length`)
 - `X-Replay-From: <n>` is the gzipped resume path. `n` counts uncompressed bytes. Answers `200` with `X-Replay-From` in the return header.
 - `Range` answers `206` and is the uncompressed resume path. Gzip and `Range`are mutually exclusive - `Range`wins when both are present.
@@ -105,7 +114,9 @@ A few notes:
 
 `GET /` returns `403`. This is expected and intentional.
 
-Posts can be refused with `409` - this is expected, handle it smoothly in application code. The beamer won't reset the drive while a game is live, so backoffs for that endpoint should be LONG.
+Posts can be refused with `409` - this is expected, handle it smoothly in application code. The beamer won't reset the drive while a game is live, so backoffs for that endpoint should be LONG. In LazyTO mode `POST /reset-beamer` is always refused (`403`): it would pull the drive out from under the Wii, and the beamer erases the replays the LazyTO laptop has collected itself, at its next power-on.
+
+In LazyTO mode the HTTP server keeps one connection open at a time instead of two.
 
 Sometimes an transfer will come back `503` - this usually means another application is already pulling from the beamer. Sometimes it's because of memory pressure for some other reason. Application code should respect the `Retry-After`, as it's meaningfully calculated rather than guessed wildly.
 
@@ -118,6 +129,8 @@ UDP is send-only - Beamers never accept UDP packets.
 Every station advertises `_beamer._tcp` on port 80 over mDNS with the instance name as its hostname.
 
 ## Multicast announce
+
+Not sent in LazyTO mode: the LazyTO relay learns each beamer from its sync (LAZYTO.md).
 
 Whenever a game starts or finsihes a beamer will send a single UDP datagram to `239.255.42.1:34700` with multicast TTL 1. Joining that group lets an application poll `/status` and `/SLIPPI/` whenever game state changes. The datagram is best-effort and unacknowledged, so a missing one is normal - the source of truth is `/status` and `/SLIPPI/`.
 

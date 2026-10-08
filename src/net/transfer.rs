@@ -221,6 +221,23 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
             return Ok(());
         }
     };
+    let mut hashing = None;
+    if crate::lazyto::enabled() {
+        match lazyto_serve(&window, &job.name, len) {
+            Serve::Live => {
+                log::info!("{}: being recorded; refusing", job.name);
+                send_503(&resp, http::ERR_LIVE);
+                return Ok(());
+            }
+            Serve::Empty => {
+                resp.send(S_404, H_JSON, http::ERR_NOT_FOUND);
+                return Ok(());
+            }
+            Serve::Go(h) => hashing = h,
+        }
+        super::project(len.saturating_sub(job.start));
+    }
+
     if job.start >= len {
         let cr = std::ffi::CString::new(format!("bytes */{len}"))?;
         resp.status(S_416);
@@ -243,7 +260,26 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
     };
     let gzip = stream.is_some();
 
-    if job.start > 0 {
+    let mut scratch = http::SCRATCH.lock().unwrap_or_else(|e| e.into_inner());
+    let http::Scratch { read: buf, out } = &mut *scratch;
+
+    if let Some(h) = hashing.as_mut() {
+        // a resumed request: the skipped prefix is hashed first, never sent
+        let mut left = job.start;
+        while left > 0 {
+            let want = (buf.len() as u64).min(left) as usize;
+            let n = match file.read(&mut buf[..want]) {
+                Ok(0) | Err(_) => {
+                    log::error!("{path}: could not read the skipped prefix, {left} B short");
+                    resp.send(S_500, H_JSON, http::ERR_STAT);
+                    return Ok(());
+                }
+                Ok(n) => n,
+            };
+            h.feed(&buf[..n]);
+            left -= n as u64;
+        }
+    } else if job.start > 0 {
         file.seek(SeekFrom::Start(job.start))?;
     }
 
@@ -265,9 +301,6 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
         resp.hdr(c"X-Replay-From", &from_echo);
     }
 
-    let mut scratch = http::SCRATCH.lock().unwrap_or_else(|e| e.into_inner());
-    let http::Scratch { read: buf, out } = &mut *scratch;
-
     crate::storage::msc::read_wait_reset();
 
     let mut sent = 0u64;
@@ -277,6 +310,7 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
     let mut chunks = 0u32;
     let mut read_us = 0u32;
     let mut read_max_us = 0u32;
+    let mut read_failed = false;
 
     {
         let mut sink = |block: &[u8]| -> anyhow::Result<()> {
@@ -296,12 +330,17 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
                 Ok(n) => n,
                 Err(e) => {
                     log::error!("{path}: read failed after the header: {e}");
+                    read_failed = true;
                     break;
                 }
             };
             let took = (http::now_us() - t0) as u32;
             read_us += took;
             read_max_us = read_max_us.max(took);
+
+            if let Some(h) = hashing.as_mut() {
+                h.feed(&buf[..n]); // the raw bytes, before gzip
+            }
 
             match stream.as_mut() {
                 Some(gz) => gz.push(&buf[..n], out, &mut sink)?,
@@ -341,11 +380,50 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
 
     resp.finish()?;
 
+    if let Some(h) = hashing.filter(|_| !read_failed) {
+        if h.complete() {
+            log::info!("{}: served whole and hashed", job.name);
+            crate::lazyto::sync::request_soon();
+        }
+    }
+
     (stats.sd_wait_us, stats.sd_wait_max_us) = crate::storage::msc::read_wait();
     stats.total_us = (http::now_us() - t_start) as u32;
     http::publish_stats(stats);
     crate::journal::heap_checkin();
     Ok(())
+}
+
+enum Serve {
+    /// the file being recorded right now: not served yet
+    Live,
+    /// a 0-byte entry: nothing to serve
+    Empty,
+    /// serve it, hashing it when the SHA accelerator's context is there
+    Go(Option<crate::lazyto::served::Hashing>),
+}
+
+/// LazyTO mode: whether to serve `name` (opened, `len` bytes), and its hash.
+fn lazyto_serve(window: &crate::storage::fat::ReadWindow, name: &str, len: u64) -> Serve {
+    use crate::lazyto::{inventory, served, wire};
+
+    if len == 0 {
+        return Serve::Empty;
+    }
+    let Some((size, fdate, ftime)) =
+        crate::storage::fat::stat(&window.fat_path(&format!("SLIPPI/{name}")))
+    else {
+        return Serve::Go(None);
+    };
+    let mtime = wire::fat_mtime(fdate, ftime);
+    let key = wire::key(name, size, mtime);
+    if inventory::live_key() == Some(key) {
+        return Serve::Live;
+    }
+    if size as u64 != len {
+        return Serve::Go(None); // changing under us: served, never acked
+    }
+    Serve::Go(served::Hashing::begin(key, size, mtime))
 }
 
 fn header(r: *mut httpd_req_t, key: &CStr) -> Option<heapless::String<MAX_HDR>> {
@@ -380,9 +458,16 @@ unsafe extern "C" fn handle(r: *mut httpd_req_t) -> esp_err_t {
     let Ok(name) = heapless::String::<MAX_NAME>::try_from(name) else {
         return resp.send(S_404, H_JSON, http::ERR_NOT_FOUND);
     };
-    let Some(indexed_len) = scan::published_size(&name) else {
-        log::info!("refused {name}: not published");
-        return resp.send(S_404, H_JSON, http::ERR_NOT_FOUND);
+    // LazyTO mode serves any replay by name (LAZYTO.md); its size, and
+    // whether it is live, are checked against the card in the worker
+    let indexed_len = if crate::lazyto::enabled() {
+        None
+    } else {
+        let Some(len) = scan::published_size(&name) else {
+            log::info!("refused {name}: not published");
+            return resp.send(S_404, H_JSON, http::ERR_NOT_FOUND);
+        };
+        Some(len)
     };
 
     if let Some(short) = super::heap_too_low() {
@@ -415,12 +500,12 @@ unsafe extern "C" fn handle(r: *mut httpd_req_t) -> esp_err_t {
     let want = match (&range, &resume) {
         (http::RangeReq::Bad, _) | (_, http::Resume::Bad) => None,
         (http::RangeReq::From(n), _) | (http::RangeReq::None, http::Resume::At(n)) => {
-            (*n < indexed_len).then_some(*n)
+            indexed_len.is_none_or(|len| *n < len).then_some(*n)
         }
         (http::RangeReq::None, http::Resume::None) => Some(0),
     };
     let Some(start) = want else {
-        let Ok(cr) = std::ffi::CString::new(format!("bytes */{indexed_len}")) else {
+        let Ok(cr) = std::ffi::CString::new(format!("bytes */{}", indexed_len.unwrap_or(0))) else {
             return resp.send(S_500, H_JSON, http::ERR_STAT);
         };
         resp.status(S_416);
@@ -455,7 +540,7 @@ unsafe extern "C" fn handle(r: *mut httpd_req_t) -> esp_err_t {
         resumed,
         gzip,
         level,
-        _transfer: super::Transfer::begin(indexed_len - start),
+        _transfer: super::Transfer::begin(indexed_len.map_or(0, |len| len - start)),
     };
 
     if let Err(job) = enqueue(job) {

@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use esp_idf_svc::eventloop::EspSystemEventLoop;
@@ -27,6 +27,42 @@ pub struct Join {
     pub hidden: bool,
 }
 
+/// Where joining the network stands, as the screen's labels say it. LazyTO
+/// mode reports it to the Wii (`beamer_hello.wifi`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum State {
+    /// associating, or waiting for an address
+    Joining = 0,
+    /// no SSID in CONFIG/config.txt
+    NoSsid = 1,
+    /// WIFI ISSUE: the network cannot be reached or refused the password
+    CantJoin = 2,
+    /// WIFI TOO FULL: joined, but no address
+    NoAddress = 3,
+    /// RADIO FAILURE
+    Radio = 4,
+    /// joined, with an address
+    Up = 5,
+}
+
+static STATE: AtomicU8 = AtomicU8::new(State::Joining as u8);
+
+pub fn state() -> State {
+    match STATE.load(Ordering::Relaxed) {
+        1 => State::NoSsid,
+        2 => State::CantJoin,
+        3 => State::NoAddress,
+        4 => State::Radio,
+        5 => State::Up,
+        _ => State::Joining,
+    }
+}
+
+pub fn set_state(s: State) {
+    STATE.store(s as u8, Ordering::Relaxed);
+}
+
 const DHCP_TIMEOUT: Duration = Duration::from_secs(30);
 
 const BACKOFF_MIN: Duration = Duration::from_secs(3);
@@ -48,12 +84,14 @@ impl Radio {
         join: &Join,
     ) -> Result<Radio, ()> {
         let wifi = EspWifi::new(modem, sysloop.clone(), Some(nvs)).map_err(|e| {
+            set_state(State::Radio);
             fail(
                 ErrorLabel::RadioFailure,
                 &["the WiFi driver would not initialise", &e.to_string()],
             )
         })?;
         let wifi = BlockingWifi::wrap(wifi, sysloop).map_err(|e| {
+            set_state(State::Radio);
             fail(
                 ErrorLabel::RadioFailure,
                 &["the WiFi event wrapper would not start", &e.to_string()],
@@ -97,6 +135,10 @@ impl Radio {
     }
 
     fn defer_retry(&mut self, label: ErrorLabel) {
+        set_state(match label {
+            ErrorLabel::WifiTooFull => State::NoAddress,
+            _ => State::CantJoin,
+        });
         let ssid = format!("ssid {:?}", self.ssid);
         errors::error(Target::Late, label, "net", &[label.detail(), &ssid]);
 
@@ -110,6 +152,7 @@ impl Radio {
     }
 
     fn associate(&mut self, hostname: &str, join: &Join) -> Result<(), ()> {
+        set_state(State::Joining);
         CONNECTING.store(true, Ordering::Relaxed);
         let result = self.try_associate(hostname, join);
         CONNECTING.store(false, Ordering::Relaxed);
@@ -134,6 +177,7 @@ impl Radio {
         self.wifi
             .set_configuration(&Configuration::Client(conf))
             .map_err(|e| {
+                set_state(State::Radio);
                 fail(
                     ErrorLabel::RadioFailure,
                     &["the WiFi configuration was rejected", &e.to_string()],
@@ -141,6 +185,7 @@ impl Radio {
             })?;
 
         self.wifi.start().map_err(|e| {
+            set_state(State::Radio);
             fail(
                 ErrorLabel::RadioFailure,
                 &["the radio would not start", &e.to_string()],
@@ -185,6 +230,7 @@ impl Radio {
             join.ssid
         );
         status::set_net(Net::Up(ip));
+        set_state(State::Up);
         status::set_signal(false);
         self.reset_backoff();
         clear_wifi_errors();
@@ -198,6 +244,7 @@ impl Radio {
             sample_link();
             if let Some(ip) = current_ip(&self.wifi) {
                 status::set_net(Net::Up(ip));
+                set_state(State::Up);
                 self.reset_backoff();
                 clear_wifi_errors();
             }
@@ -205,6 +252,9 @@ impl Radio {
         }
 
         status::set_net(Net::Offline);
+        if state() == State::Up {
+            set_state(State::Joining);
+        }
         TICK_FAST.store(true, Ordering::Relaxed);
 
         if Instant::now() < self.next_attempt {

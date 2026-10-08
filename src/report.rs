@@ -128,14 +128,34 @@ pub struct LinkInfo {
     pub channel: u8,
 }
 
-/// LazyTO mode's line in `GET /status` (LAZYTO.md).
+/// LazyTO mode's object in `GET /status` (LAZYTO.md, API.md). The secret
+/// itself is never in it: only whether there is one.
 #[derive(Debug, Clone, Copy)]
 pub struct LazytoInfo {
+    pub fw_build: u32,
+    pub station_set: bool,
+    pub secret: bool,
+    pub wifi: &'static str,
+    pub storage: &'static str,
     pub relay: Option<std::net::SocketAddrV4>,
+    pub beacon_age_s: Option<u16>,
     pub requests_served: u32,
     pub last_result: Option<&'static str>,
+    pub telemetry_dropped: u32,
     /// the mailbox's own counters, by name
     pub mailbox: [(&'static str, u32); 7],
+    /// the inventory's counts, by name (`None` before its first walk)
+    pub inventory: Option<[(&'static str, u32); 6]>,
+    pub free_mb: Option<u32>,
+    pub card_mb: u32,
+    pub used_mb: u32,
+    /// this boot's cold-boot erase, by name
+    pub erase_counts: [(&'static str, u32); 4],
+    pub erase_flags: [(&'static str, bool); 3],
+    /// the syncs, by name
+    pub sync_counts: [(&'static str, u32); 3],
+    pub sync_last: Option<&'static str>,
+    pub sync_last_age_s: Option<u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -205,27 +225,7 @@ pub fn status_json(
     );
     line_secs_since(s, "secs_since_game_start", fast.game_start_at, now_s);
     if let Some(l) = lazyto {
-        s.push_str("  \"lazyto\": {\"relay\": ");
-        match l.relay {
-            Some(r) => {
-                let _ = write!(s, "\"{r}\"");
-            }
-            None => s.push_str("null"),
-        }
-        let _ = write!(s, ", \"requests_served\": {}", l.requests_served);
-        s.push_str(", \"last_result\": ");
-        match l.last_result {
-            Some(r) => {
-                let _ = write!(s, "\"{r}\"");
-            }
-            None => s.push_str("null"),
-        }
-        s.push_str(", \"mailbox\": {");
-        for (i, (name, n)) in l.mailbox.iter().enumerate() {
-            let sep = if i == 0 { "" } else { ", " };
-            let _ = write!(s, "{sep}\"{name}\": {n}");
-        }
-        s.push_str("}},\n");
+        lazyto_json(s, &l);
     }
     line_str(s, "health", Some(health.as_str()));
 
@@ -235,6 +235,69 @@ pub fn status_json(
     s.push('}');
     s.push('\n');
     s.finish("GET /status");
+}
+
+fn opt_json<const N: usize, T: core::fmt::Display>(s: &mut Buf<N>, v: Option<T>, quoted: bool) {
+    match v {
+        Some(v) if quoted => {
+            let _ = write!(s, "\"{v}\"");
+        }
+        Some(v) => {
+            let _ = write!(s, "{v}");
+        }
+        None => s.push_str("null"),
+    }
+}
+
+fn fields_json<const N: usize, T: core::fmt::Display>(s: &mut Buf<N>, items: &[(&str, T)]) {
+    for (i, (name, v)) in items.iter().enumerate() {
+        let sep = if i == 0 { "" } else { ", " };
+        let _ = write!(s, "{sep}\"{name}\": {v}");
+    }
+}
+
+fn lazyto_json<const N: usize>(s: &mut Buf<N>, l: &LazytoInfo) {
+    let _ = write!(
+        s,
+        "  \"lazyto\": {{\"fw_build\": {}, \"station_set\": {}, \"secret\": {}, \"wifi\": \"{}\", \"storage\": \"{}\",\n    \"relay\": ",
+        l.fw_build, l.station_set, l.secret, l.wifi, l.storage
+    );
+    opt_json(s, l.relay, true);
+    s.push_str(", \"beacon_age_s\": ");
+    opt_json(s, l.beacon_age_s, false);
+    let _ = write!(s, ", \"requests_served\": {}", l.requests_served);
+    s.push_str(", \"last_result\": ");
+    opt_json(s, l.last_result, true);
+    let _ = write!(s, ", \"telemetry_dropped\": {}", l.telemetry_dropped);
+    s.push_str(",\n    \"mailbox\": {");
+    fields_json(s, &l.mailbox);
+    s.push_str("},\n    \"inventory\": ");
+    match &l.inventory {
+        Some(c) => {
+            s.push('{');
+            fields_json(s, c);
+            s.push('}');
+        }
+        None => s.push_str("null"),
+    }
+    s.push_str(", \"free_mb\": ");
+    opt_json(s, l.free_mb, false);
+    let _ = write!(
+        s,
+        ", \"card_mb\": {}, \"used_mb\": {}",
+        l.card_mb, l.used_mb
+    );
+    s.push_str(",\n    \"erase\": {");
+    fields_json(s, &l.erase_counts);
+    s.push_str(", ");
+    fields_json(s, &l.erase_flags);
+    s.push_str("},\n    \"sync\": {");
+    fields_json(s, &l.sync_counts);
+    s.push_str(", \"last\": ");
+    opt_json(s, l.sync_last, true);
+    s.push_str(", \"last_age_s\": ");
+    opt_json(s, l.sync_last_age_s, false);
+    s.push_str("}},\n");
 }
 
 pub fn index_json(station_id: &str, files: &[(&str, u64)], s: &mut Buf<INDEX_CAP>) {

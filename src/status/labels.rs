@@ -109,6 +109,15 @@ impl WarningLabel {
     }
 
     pub fn reason(self) -> &'static str {
+        // LazyTO mode counts space, not files, and erases collected replays
+        // itself at power-on (LAZYTO.md)
+        if crate::lazyto::enabled() {
+            match self {
+                WarningLabel::DriveFull => return "under 64 MB free: the next replay would fail",
+                WarningLabel::DriveFilling => return "replug to erase collected replays",
+                _ => {}
+            }
+        }
         match self {
             WarningLabel::DriveFailing => "cannot read the card",
             WarningLabel::DriveFull => "new replays are not served",
