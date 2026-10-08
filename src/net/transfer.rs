@@ -64,6 +64,9 @@ const STEP_STATS: u8 = 7;
 const STEP_COMPLETE: u8 = 8;
 const STEP_CLOSE: u8 = 9;
 const STEP_DROP: u8 = 10;
+const STEP_UNLOCK: u8 = 11;
+const STEP_CLOSE_FILE: u8 = 12;
+const STEP_UNMOUNT: u8 = 13;
 
 fn step(s: u8, bytes: u64) {
     STEP.store(s, Ordering::Relaxed);
@@ -88,7 +91,10 @@ pub fn progress_note() -> Option<String> {
         STEP_STATS => "stats",
         STEP_COMPLETE => "async complete",
         STEP_CLOSE => "session close",
-        _ => "job drop",
+        STEP_DROP => "job drop",
+        STEP_UNLOCK => "scratch unlock",
+        STEP_CLOSE_FILE => "file close",
+        _ => "unmount",
     };
     let now = (http::now_us() / 1000) as u32;
     let idle = now.wrapping_sub(STEP_AT_MS.load(Ordering::Relaxed));
@@ -456,6 +462,15 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
     stats.total_us = (http::now_us() - t_start) as u32;
     http::publish_stats(stats);
     crate::journal::heap_checkin();
+
+    // each release on its own step: a transfer hung after its stats line
+    // (hardware, 2026-10-08), where only these drops were left
+    step(STEP_UNLOCK, bytes);
+    drop(scratch);
+    step(STEP_CLOSE_FILE, bytes);
+    drop(file);
+    step(STEP_UNMOUNT, bytes);
+    drop(window);
     Ok(())
 }
 
