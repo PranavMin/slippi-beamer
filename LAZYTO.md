@@ -230,7 +230,7 @@ erased. Its fixed state is about 560 B of static RAM.
 
 `components/beamer_lazyto/include/relay_proto.h` is a verbatim copy of LazyTO's generated header
 (`kiosk/include/relay_proto.h` on LazyTO branch `redesign-v2`, generated from `protocol.yaml` at
-`b0e4e56`), MIT-licensed (`SPDX-License-Identifier: MIT`). **Never hand-edit it**: change
+`d225215`), MIT-licensed (`SPDX-License-Identifier: MIT`). **Never hand-edit it**: change
 `protocol.yaml` in LazyTO, regenerate with `tools/gen_protocol.py`, and copy the file over again.
 Rust sees it through bindgen as `esp_idf_sys::lazyto` (the `bindings_module` in `Cargo.toml`),
 so its names never mix with ESP-IDF's. All multi-byte integers in it are big-endian on the wire;
