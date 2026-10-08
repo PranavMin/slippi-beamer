@@ -1,5 +1,5 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -43,6 +43,46 @@ static WAKE: Condvar = Condvar::new();
 static STOP: AtomicBool = AtomicBool::new(false);
 
 static BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Where the current transfer is, for the journal's heartbeat: a transfer
+/// that stops making progress shows the step it stopped in.
+static STEP: AtomicU8 = AtomicU8::new(STEP_IDLE);
+static STEP_BYTES: AtomicU32 = AtomicU32::new(0);
+static STEP_AT_MS: AtomicU32 = AtomicU32::new(0);
+const STEP_IDLE: u8 = 0;
+const STEP_OPEN: u8 = 1;
+const STEP_READ: u8 = 2;
+const STEP_HASH: u8 = 3;
+const STEP_SEND: u8 = 4;
+const STEP_FINISH: u8 = 5;
+
+fn step(s: u8, bytes: u64) {
+    STEP.store(s, Ordering::Relaxed);
+    STEP_BYTES.store(bytes.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+    STEP_AT_MS.store((http::now_us() / 1000) as u32, Ordering::Relaxed);
+}
+
+/// The current transfer's step, bytes read so far and ms since it entered
+/// that step; `None` when no replay is being served.
+pub fn progress_note() -> Option<String> {
+    let s = STEP.load(Ordering::Relaxed);
+    if s == STEP_IDLE {
+        return None;
+    }
+    let name = match s {
+        STEP_OPEN => "open",
+        STEP_READ => "read",
+        STEP_HASH => "hash",
+        STEP_SEND => "send",
+        _ => "finish",
+    };
+    let now = (http::now_us() / 1000) as u32;
+    let idle = now.wrapping_sub(STEP_AT_MS.load(Ordering::Relaxed));
+    Some(format!(
+        "transfer in {name} at {} B read, {idle} ms in that step",
+        STEP_BYTES.load(Ordering::Relaxed)
+    ))
+}
 static SERVER_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 fn close_async_session(fd: c_int) {
@@ -98,6 +138,7 @@ fn worker(card: Arc<SdCard>) {
         };
 
         let raw = job.req;
+        step(STEP_OPEN, 0);
         if let Err(e) = run(&card, &job) {
             log::error!("{}: transfer failed: {e}", job.name);
         }
@@ -105,6 +146,7 @@ fn worker(card: Arc<SdCard>) {
         unsafe { httpd_req_async_handler_complete(raw) };
         close_async_session(fd);
         drop(job);
+        step(STEP_IDLE, 0);
         BUSY.store(false, Ordering::SeqCst);
     }
     log::info!("transfer worker down");
@@ -324,6 +366,7 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
         };
 
         loop {
+            step(STEP_READ, bytes);
             let t0 = http::now_us();
             let n = match file.read(buf) {
                 Ok(0) => break,
@@ -339,9 +382,11 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
             read_max_us = read_max_us.max(took);
 
             if let Some(h) = hashing.as_mut() {
+                step(STEP_HASH, bytes);
                 h.feed(&buf[..n]); // the raw bytes, before gzip
             }
 
+            step(STEP_SEND, bytes);
             match stream.as_mut() {
                 Some(gz) => gz.push(&buf[..n], out, &mut sink)?,
                 None => sink(&buf[..n])?,
@@ -351,6 +396,7 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
             bytes += n as u64;
         }
 
+        step(STEP_FINISH, bytes);
         if let Some(gz) = stream.as_mut() {
             gz.finish(out, &mut sink)?;
         }

@@ -245,12 +245,24 @@ fn run(mut out: Vec<u8>, mut reply: Vec<u8>) {
         if let (Some(relay), Some(_), Some(secret)) = (relay, ip, secret) {
             if schedule.due() && !mailbox::request_pending() {
                 schedule.run(relay, &secret, &mut out, &mut reply);
-                log::info!("relay: stack {} B never used of {STACK}", stack_left());
+                let left = stack_left();
+                if left < STACK_LEFT.fetch_min(left, Ordering::Relaxed) {
+                    log::info!("relay: stack {left} B never used of {STACK}");
+                }
             }
         }
     }
 
     log::info!("relay: standing down");
+}
+
+/// The relay task's stack margin after its last sync, for the journal's
+/// heartbeat; logged when it shrinks.
+static STACK_LEFT: AtomicU32 = AtomicU32::new(u32::MAX);
+
+pub fn stack_note() -> Option<u32> {
+    let left = STACK_LEFT.load(Ordering::Relaxed);
+    (left != u32::MAX).then_some(left)
 }
 
 /// Bytes of this task's stack never touched so far (FreeRTOS's high-water

@@ -4,7 +4,7 @@ pub mod gz;
 pub mod http;
 pub mod mdns;
 pub mod relay;
-mod transfer;
+pub(crate) mod transfer;
 pub mod wifi;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
