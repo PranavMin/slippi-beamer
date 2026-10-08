@@ -7,10 +7,13 @@
 //! The reply is signed: HMAC-SHA256 keyed with the secret, over the
 //! request's nonce, the beamer's station_id and the reply. Without it,
 //! anyone on the Wi-Fi could download a file, answer "held" with its hash,
-//! and make the beamer erase a replay nobody kept. A file is acked only when
-//! the laptop's hash equals the one the beamer computed serving it this boot
-//! (`served.rs`). The layout is frozen under `BEAMER_SYNC_VERSION`: dongles
-//! have no over-the-air update.
+//! and make the beamer erase a replay nobody kept. The secret itself never
+//! leaves the beamer: `relay_auth`, which goes to whichever host sent the
+//! last beacon, carries a key derived from it ([`auth_key`]), so a host that
+//! poses as the relay learns nothing that signs a reply. A file is acked
+//! only when the laptop's hash equals the one the beamer computed serving it
+//! this boot (`served.rs`). The layout is frozen under
+//! `BEAMER_SYNC_VERSION`: dongles have no over-the-air update.
 //!
 //! When: after each served file, when the inventory finds a new file, and
 //! every 30 s; again soon when more files wait than one sync lists.
@@ -28,8 +31,8 @@ use esp_idf_svc::sys::lazyto::{
     beamer_sync_req, beamer_sync_resp, relay_auth, relay_cmd_CMD_BEAMER_SYNC, relay_hdr,
     relay_resp, relay_status_ST_OK, sync_answer, sync_answer_kind_SA_HELD,
     sync_answer_kind_SA_WANTED, sync_file, sync_kind_SK_LIVE, AUTH_MAGIC_0, AUTH_MAGIC_1,
-    BEAMER_LAZYTO_FW_BUILD, BEAMER_SYNC_VERSION, RELAY_MAGIC_0, RELAY_MAGIC_1, SHA256_LEN,
-    SYNC_ID_LEN,
+    BEAMER_LAZYTO_FW_BUILD, BEAMER_SYNC_VERSION, RELAY_MAGIC_0, RELAY_MAGIC_1, SECRET_LEN,
+    SHA256_LEN, SYNC_ID_LEN,
 };
 
 use super::acks::{self, Record};
@@ -57,6 +60,7 @@ pub const OUT_BYTES: usize = AUTH + HDR + REQ + LISTED * FILE;
 pub const IN_BYTES: usize = HDR + RESP + REPLY + LISTED * ANSWER;
 
 const _: () = assert!(REQ == 100 && FILE == 84 && REPLY == 52 && ANSWER == 36);
+const _: () = assert!(hmac::AUTH_KEY == SECRET_LEN as usize);
 
 const EVERY: Duration = Duration::from_secs(30);
 const AGAIN: Duration = Duration::from_secs(2);
@@ -224,6 +228,18 @@ impl Sha256 for Engine {
     }
 }
 
+/// `relay_auth`, for `secret`, into the first [`AUTH`] bytes of `out`: the
+/// magic and the key derived from the secret (`hmac::auth_key`), never the
+/// secret itself. On the relay task, like every user of the sync SHA slot.
+pub fn put_auth(out: &mut [u8], secret: &Secret) {
+    out[..AUTH].fill(0);
+    out[offset_of!(relay_auth, magic)] = AUTH_MAGIC_0 as u8;
+    out[offset_of!(relay_auth, magic) + 1] = AUTH_MAGIC_1 as u8;
+    let key = hmac::auth_key(|| Engine(Sha::begin(ShaSlot::Sync)), secret.padded());
+    let at = offset_of!(relay_auth, key);
+    out[at..at + key.len()].copy_from_slice(&key);
+}
+
 /// One file in this sync, and its hash if the beamer served it whole.
 struct Listed {
     c: Candidate,
@@ -340,10 +356,7 @@ fn encode(
     let b = &mut out[..len];
     b.fill(0);
 
-    b[offset_of!(relay_auth, magic)] = AUTH_MAGIC_0 as u8;
-    b[offset_of!(relay_auth, magic) + 1] = AUTH_MAGIC_1 as u8;
-    let at = offset_of!(relay_auth, secret);
-    b[at..at + secret.padded().len()].copy_from_slice(secret.padded());
+    put_auth(b, secret);
 
     let station = crate::name::number();
     let set = crate::name::is_set();

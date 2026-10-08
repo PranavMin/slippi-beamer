@@ -1,7 +1,8 @@
 //! LazyTO mode: the relay task. It finds the LazyTO relay on the LAN by its
 //! UDP beacon, and carries the Wii's requests and telemetry from the mailbox
 //! (`storage::mailbox`) to the relay and the answers back. A pipe: it puts
-//! `relay_auth` (LAZYTO-SECRET) in front of what the Wii wrote and never
+//! `relay_auth` (the key derived from LAZYTO-SECRET, never the secret,
+//! `sync::put_auth`) in front of what the Wii wrote and never
 //! parses the rest; the Wii holds no secret (mailbox v2, LazyTO's
 //! docs/protocol-v2.md). Between requests it runs the beamer's own sync
 //! (`lazyto::sync`).
@@ -23,9 +24,8 @@ use esp_idf_svc::sys::lazyto::{
     beamer_flags_BF_WIFI, beamer_result_BR_BAD_REQ, beamer_result_BR_CONNECT,
     beamer_result_BR_NO_RELAY, beamer_result_BR_NO_SECRET, beamer_result_BR_NO_STATION,
     beamer_result_BR_NO_WIFI, beamer_result_BR_OK, beamer_result_BR_TIMEOUT,
-    beamer_result_BR_TOO_LARGE, beamer_wifi_WIFI_UP, relay_auth, relay_beacon, AUTH_MAGIC_0,
-    AUTH_MAGIC_1, BEACON_INTERVAL_MS, BEACON_PORT, BEACON_STALE_S, RELAY_MAGIC_0, RELAY_MAGIC_1,
-    RELAY_PROTO_VERSION, TELEMETRY_PORT,
+    beamer_result_BR_TOO_LARGE, beamer_wifi_WIFI_UP, relay_auth, relay_beacon, BEACON_INTERVAL_MS,
+    BEACON_PORT, BEACON_STALE_S, RELAY_MAGIC_0, RELAY_MAGIC_1, RELAY_PROTO_VERSION, TELEMETRY_PORT,
 };
 
 use crate::config::Secret;
@@ -371,15 +371,6 @@ fn ask_for_beacon(socket: &UdpSocket) {
     }
 }
 
-/// `relay_auth` for `secret`, into the first `AUTH` bytes of `out`.
-fn put_auth(out: &mut [u8], secret: &Secret) {
-    out[..AUTH].fill(0);
-    out[offset_of!(relay_auth, magic)] = AUTH_MAGIC_0 as u8;
-    out[offset_of!(relay_auth, magic) + 1] = AUTH_MAGIC_1 as u8;
-    let at = offset_of!(relay_auth, secret);
-    out[at..at + secret.padded().len()].copy_from_slice(secret.padded());
-}
-
 /// One telemetry datagram: `relay_auth` + what the kernel wrote, to the
 /// relay's telemetry port. Dropped without a number or a secret (the relay
 /// would take an unnumbered station for Dolphin's station 0), or without
@@ -400,7 +391,7 @@ fn forward_telemetry(
         TELE_DROPPED.fetch_add(1, Ordering::Relaxed);
         return;
     };
-    put_auth(out, secret);
+    sync::put_auth(out, secret);
     let to = SocketAddrV4::new(*relay.ip(), TELEMETRY_PORT as u16);
     if let Err(e) = socket.send_to(&out[..AUTH + n], to) {
         log::debug!("relay: telemetry not sent: {e}");
@@ -427,7 +418,7 @@ fn answer(
         } else if ip.is_none() {
             (NO_WIFI, 0)
         } else if let (Some(relay), Some(secret)) = (relay, secret) {
-            put_auth(out, secret);
+            sync::put_auth(out, secret);
             round_trip(relay, &out[..AUTH + req.len], body)
         } else {
             (NO_RELAY, 0)

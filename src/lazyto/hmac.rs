@@ -1,15 +1,33 @@
 //! HMAC-SHA256 (RFC 2104) over any SHA-256 engine, and a constant-time
 //! compare. The beamer checks the signature on a sync reply with it
-//! (`sync.rs`), on the ESP32-S3's SHA accelerator (`sha.rs`).
+//! (`sync.rs`), and derives `relay_auth`'s key from the secret
+//! ([`auth_key`]), on the ESP32-S3's SHA accelerator (`sha.rs`).
 //!
 //! Pure Rust with no crate imports, so it also builds on a PC:
 //! `tools/lazyto_host_tests.sh` runs the tests below, including the sync
-//! signature vector from LazyTO's docs/protocol-v2.md.
+//! signature and `relay_auth` key vectors from LazyTO's docs/protocol-v2.md.
 
 /// SHA-256's block size, and so HMAC's key block.
 pub const BLOCK: usize = 64;
 /// SHA-256's digest size.
 pub const DIGEST: usize = 32;
+/// `relay_auth`'s key is HMAC-SHA256 of these 17 ASCII bytes, keyed with
+/// the NUL-padded secret.
+pub const AUTH_LABEL: &[u8] = b"LazyTO relay_auth";
+/// How much of that HMAC `relay_auth` carries (`SECRET_LEN`).
+pub const AUTH_KEY: usize = 16;
+
+/// `relay_auth`'s key for a NUL-padded secret: the first [`AUTH_KEY`] bytes
+/// of HMAC-SHA256(secret, [`AUTH_LABEL`]). The beamer sends this, never the
+/// secret: `relay_auth` goes to whichever host sent the last beacon, and the
+/// secret itself keys the sync reply's signature, which lets the beamer
+/// erase.
+pub fn auth_key<H: Sha256>(new: impl FnMut() -> H, secret: &[u8]) -> [u8; AUTH_KEY] {
+    let mac = hmac(new, secret, &[AUTH_LABEL]);
+    let mut key = [0u8; AUTH_KEY];
+    key.copy_from_slice(&mac[..AUTH_KEY]);
+    key
+}
 
 /// One SHA-256 computation: feed it, then take the digest.
 pub trait Sha256 {
@@ -247,6 +265,20 @@ mod tests {
             mac.to_vec(),
             hex("dff09c43e230fa9913e545f4df881b9f78dbc9046530bfe3654b6583e988e48b")
         );
+    }
+
+    /// docs/protocol-v2.md "Test vector: relay_auth's key": the key, not the
+    /// secret, and not what signs a sync reply.
+    #[test]
+    fn protocol_v2_relay_auth_key() {
+        let mut secret = [0u8; 16];
+        secret[..12].copy_from_slice(b"venue-secret");
+        let key = auth_key(Soft::new, &secret);
+        assert_eq!(key.to_vec(), hex("f5a1b91cb53cb4b14fd06c5ea683c221"));
+        assert_ne!(key, secret);
+        let mut other = [0u8; 16];
+        other[..12].copy_from_slice(b"other-secret");
+        assert_ne!(auth_key(Soft::new, &other), key);
     }
 
     #[test]

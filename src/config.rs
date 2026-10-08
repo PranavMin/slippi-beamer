@@ -151,8 +151,9 @@ impl Psk {
     }
 }
 
-/// LazyTO's relay secret (LAZYTO.md), NUL-padded as `relay_auth` carries it.
-/// Never served, never logged: `Debug` hides it.
+/// LazyTO's relay secret (LAZYTO.md), NUL-padded. Never sent, served or
+/// logged (`Debug` hides it): `relay_auth` carries a key derived from it
+/// (`lazyto::sync::auth_key`), and it keys the sync reply's signature.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Secret([u8; SECRET_MAX]);
 
@@ -176,7 +177,7 @@ impl Secret {
         Ok(Secret(b))
     }
 
-    /// The 16 bytes `relay_auth.secret` carries, NUL-padded.
+    /// The secret's 16 bytes, NUL-padded: the key of both HMACs.
     pub fn padded(&self) -> &[u8; SECRET_MAX] {
         &self.0
     }

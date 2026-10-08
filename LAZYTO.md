@@ -88,8 +88,12 @@ raises that limit to `end + 16` and serves those 16 sectors from RAM:
   only does a `memcpy` and notifies the relay task. All network work happens in that task on
   core 0.
 - **The ESP owns the secret.** Mailbox v1 had the Wii write `relay_auth` from its card; v2
-  (as built) is back to this: `LAZYTO-SECRET` in the Beamer's `config.txt`, put in front of
-  each request and telemetry datagram, and the Wii holds no secret.
+  (as built) is back to this: `LAZYTO-SECRET` in the Beamer's `config.txt`, and the Wii holds no
+  secret. The secret itself never leaves the Beamer. `relay_auth`, in front of each request,
+  telemetry datagram and sync, carries a key derived from it: the first 16 bytes of
+  HMAC-SHA256 keyed with the NUL-padded secret over `LazyTO relay_auth` (`hmac::auth_key`). The
+  Beamer sends `relay_auth` to whichever host sent the last beacon, so one forged beacon
+  collects that key; the secret, which signs the sync reply, stays here.
 - **One request at a time.** This matches the kernel today: one buffer and one state machine.
 
 ### Round trip
@@ -230,7 +234,7 @@ erased. Its fixed state is about 560 B of static RAM.
 
 `components/beamer_lazyto/include/relay_proto.h` is a verbatim copy of LazyTO's generated header
 (`kiosk/include/relay_proto.h` on LazyTO branch `redesign-v2`, generated from `protocol.yaml` at
-`d225215`), MIT-licensed (`SPDX-License-Identifier: MIT`). **Never hand-edit it**: change
+`5dfc5fb`), MIT-licensed (`SPDX-License-Identifier: MIT`). **Never hand-edit it**: change
 `protocol.yaml` in LazyTO, regenerate with `tools/gen_protocol.py`, and copy the file over again.
 Rust sees it through bindgen as `esp_idf_sys::lazyto` (the `bindings_module` in `Cargo.toml`),
 so its names never mix with ESP-IDF's. All multi-byte integers in it are big-endian on the wire;
@@ -350,7 +354,7 @@ otherwise.
 - **Requests.** Refused locally, in this order, without the relay: `BR_BAD_REQ` for a malformed
   sector, `BR_NO_STATION` without a number, `BR_NO_SECRET` without `LAZYTO-SECRET`,
   `BR_NO_WIFI` without an address, `BR_NO_RELAY` before a beacon. Otherwise one TCP connection:
-  connect, send `relay_auth` (the secret, NUL-padded) + the Wii's bytes, read until the relay
+  connect, send `relay_auth` (the key from the secret) + the Wii's bytes, read until the relay
   closes, all inside 2,500 ms (the Wii's own budget is 3,000 ms), close. A failed connect, send
   or read is `BR_CONNECT`, a spent budget `BR_TIMEOUT`, more than 4,084 bytes `BR_TOO_LARGE`.
   One attempt, no retries; the kiosk shows the error and A retries. The Beamer never parses
@@ -454,6 +458,8 @@ the whole exchange 1.5 s.
   (constant-time compare), keyed with the 16 NUL-padded secret bytes over the nonce, the
   `station_id` and the payload after the HMAC. Without the signature, anyone on the Wi-Fi could
   download a file, answer "held" with its hash, and make the Beamer erase a replay nobody kept.
+  The key is the secret itself, never `relay_auth`'s key: a host that sent a beacon receives that
+  key with the sync request, and must not be able to sign the reply.
 - **Then** a different `archive_id` drops every ack and is adopted (another laptop, or a deleted
   archive folder: the files are collected again while the Beamer is still powered), and each
   `SA_HELD` whose hash equals the Beamer's own for that file is acked. A "held" for a file not
@@ -540,7 +546,8 @@ sudo tools/lazyto_host.py /dev/sdX --list-sets
 ```
 
 `tools/lazyto_host_tests.sh` runs the unit tests of the pure modules (`src/lazyto/hmac.rs`,
-`src/lazyto/wire.rs`) on a PC with rustup's stable toolchain.
+`src/lazyto/wire.rs`) on a PC with rustup's stable toolchain, including LazyTO's two vectors:
+the sync signature and `relay_auth`'s key.
 
 ### Known limits and open questions
 
