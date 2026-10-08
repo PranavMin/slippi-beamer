@@ -148,7 +148,11 @@ fn run(mut out: Vec<u8>) {
     while !super::stopping() {
         let ip = crate::status::ip();
 
-        if beacon.is_none() && Instant::now() >= next_open {
+        // No socket before the station has an address: the net task brings
+        // lwIP up after this task starts, and a socket call before that
+        // trips lwIP's tcpip mbox assert (panic in task relay, first boot
+        // on hardware, 2026-10-07).
+        if beacon.is_none() && ip.is_some() && Instant::now() >= next_open {
             next_open = Instant::now() + BEACON_INTERVAL;
             beacon = open_beacon();
         }
