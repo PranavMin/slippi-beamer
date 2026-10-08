@@ -64,7 +64,7 @@ Station number is set with the button on the beamer - clicking goes up and, if y
 | `NUM-REPLAYS-SERVED` | `10`    | How many of the newest replays the station hands out over HTTP. 1 to 16.                                                                                  |
 | `REPLAY-CAP`         | `512`   | How many replays the station counts on the card before it stops counting. 1 to 512. Past 75% it warns; at the cap it warns and stops serving new replays. |
 | `LED-BRIGHTNESS`     | `20`    | The status LED brightness, 0 to 100 percent.                                                                                                              |
-| `FLIP-SCREEN`        | `false` | Whether the screen starts upside down. If you stand your Wii up, you probably want this.                                                                  |
+| `FLIP-SCREEN`        | `true`  | Whether the screen starts upside down. If you stand your Wii up, you probably want this.                                                                  |
 | `DEBUG`              | `false` | Debug mode. Don't use this unless you know what you're doing.                                                                                             |
 | `LAZYTO`             | `false` | LazyTO mode (this fork only): the Beamer carries a LazyTO Wii's relay traffic over its own Wi-Fi, keeps its station number in flash, and erases the replays the LazyTO laptop has collected at its next power-on. Read at boot only. See [LAZYTO.md](LAZYTO.md). |
 | `LAZYTO-SECRET`      | blank   | LazyTO mode only: the LazyTO relay's secret, 8 to 16 letters, digits, `-` or `_`. Never served or logged. Follows edits live.                                     |

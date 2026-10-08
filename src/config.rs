@@ -48,7 +48,8 @@ pub const REPLAY_CAP_MAX: u32 = 512;
 pub const LED_PCT_DEFAULT: u8 = 20;
 pub const LED_PCT_MAX: u8 = 100;
 pub const DEBUG_DEFAULT: bool = false;
-pub const FLIP_SCREEN_DEFAULT: bool = false;
+/// LazyTO's beamers stand behind the Wii with the screen upside down.
+pub const FLIP_SCREEN_DEFAULT: bool = true;
 pub const LAZYTO_DEFAULT: bool = false;
 /// LAZYTO-SECRET: LazyTO's relay secret, as the relay's own config checks
 /// it (8 to 16 letters, digits, `-` or `_`). `SECRET_LEN` in relay_proto.h.
