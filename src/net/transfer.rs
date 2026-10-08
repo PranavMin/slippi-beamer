@@ -55,6 +55,11 @@ const STEP_READ: u8 = 2;
 const STEP_HASH: u8 = 3;
 const STEP_SEND: u8 = 4;
 const STEP_FINISH: u8 = 5;
+const STEP_HASHED: u8 = 6;
+const STEP_STATS: u8 = 7;
+const STEP_COMPLETE: u8 = 8;
+const STEP_CLOSE: u8 = 9;
+const STEP_DROP: u8 = 10;
 
 fn step(s: u8, bytes: u64) {
     STEP.store(s, Ordering::Relaxed);
@@ -74,12 +79,17 @@ pub fn progress_note() -> Option<String> {
         STEP_READ => "read",
         STEP_HASH => "hash",
         STEP_SEND => "send",
-        _ => "finish",
+        STEP_FINISH => "finish",
+        STEP_HASHED => "hash finish",
+        STEP_STATS => "stats",
+        STEP_COMPLETE => "async complete",
+        STEP_CLOSE => "session close",
+        _ => "job drop",
     };
     let now = (http::now_us() / 1000) as u32;
     let idle = now.wrapping_sub(STEP_AT_MS.load(Ordering::Relaxed));
     Some(format!(
-        "transfer in {name} at {} B read, {idle} ms in that step",
+        "{name} @{} B {idle} ms",
         STEP_BYTES.load(Ordering::Relaxed)
     ))
 }
@@ -143,8 +153,11 @@ fn worker(card: Arc<SdCard>) {
             log::error!("{}: transfer failed: {e}", job.name);
         }
         let fd = unsafe { httpd_req_to_sockfd(raw) };
+        step(STEP_COMPLETE, 0);
         unsafe { httpd_req_async_handler_complete(raw) };
+        step(STEP_CLOSE, 0);
         close_async_session(fd);
+        step(STEP_DROP, 0);
         drop(job);
         step(STEP_IDLE, 0);
         BUSY.store(false, Ordering::SeqCst);
@@ -426,6 +439,7 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
 
     resp.finish()?;
 
+    step(STEP_HASHED, bytes);
     if let Some(h) = hashing.filter(|_| !read_failed) {
         if h.complete() {
             log::info!("{}: served whole and hashed", job.name);
@@ -433,6 +447,7 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
         }
     }
 
+    step(STEP_STATS, bytes);
     (stats.sd_wait_us, stats.sd_wait_max_us) = crate::storage::msc::read_wait();
     stats.total_us = (http::now_us() - t_start) as u32;
     http::publish_stats(stats);

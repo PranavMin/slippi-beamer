@@ -762,11 +762,11 @@ static HEAP_LOW: AtomicU32 = AtomicU32::new(u32::MAX);
 fn heartbeat() {
     let (free, largest) = heap_now();
     let oom = crate::net::oom_count();
-    let stack = crate::net::relay::stack_note()
-        .map_or_else(|| "no sync yet".to_owned(), |b| format!("{b} B"));
-    let transfer = crate::net::transfer::progress_note().unwrap_or_else(|| "no transfer".to_owned());
+    let stack = crate::net::relay::stack_note().unwrap_or(0);
+    let transfer = crate::net::transfer::progress_note().unwrap_or_else(|| "idle".to_owned());
+    // short: the log capture cuts a longer line, newline and all
     log::info!(
-        "heartbeat: heap {free} B free, largest {largest} B, low {} B, {oom} failed alloc(s); relay stack left {stack}; {transfer}",
+        "hb: heap {free}/{largest} low {} oom {oom}; relay stack {stack}; xfer {transfer}",
         heap_low()
     );
 }
