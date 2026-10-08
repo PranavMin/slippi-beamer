@@ -429,11 +429,13 @@ In LazyTO mode `GET /SLIPPI/<name>` serves any replay on the card, not only this
 `NUM-REPLAYS-SERVED`; `Range` and `X-Replay-From` are checked against the file itself. The live
 file is refused with `503` and `Retry-After`; an empty entry is `404`. HTTP keeps one socket
 (`max_open_sockets` 1): lwIP has two active TCP connections, and the relay link needs the other
-one when the kiosk reports a score while a replay downloads. `POST /reset-beamer` is refused
+one when the kiosk reports a score while a replay downloads. Replays go out raw, never gzipped,
+whatever `Accept-Encoding` asks: the gzip arena (15 KB) does not fit beside the relay link's
+buffers, and a download that ran the heap out stalled in send for good. `POST /reset-beamer` is refused
 (`403`): its wipe withdraws the medium under a mounted Wii, whose FatFs never notices.
 
 While serving, the transfer task hashes the file (`src/lazyto/served.rs`): SHA-256 on the SHA
-accelerator over the raw bytes before gzip, and a CRC32 of the first 1 KB. A resumed request
+accelerator over the bytes sent, and a CRC32 of the first 1 KB. A resumed request
 reads and hashes the skipped prefix first, without sending it. A file sent whole goes into a
 RAM table of the last 32 (acked ones leave first), and a sync follows. Nothing is hashed at boot
 or when idle: a file served before a reboot is simply served again.

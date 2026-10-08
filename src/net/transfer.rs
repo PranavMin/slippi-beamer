@@ -383,7 +383,7 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
 
             if let Some(h) = hashing.as_mut() {
                 step(STEP_HASH, bytes);
-                h.feed(&buf[..n]); // the raw bytes, before gzip
+                h.feed(&buf[..n]); // the raw bytes (gzip only outside LazyTO mode)
             }
 
             step(STEP_SEND, bytes);
@@ -570,7 +570,13 @@ unsafe extern "C" fn handle(r: *mut httpd_req_t) -> esp_err_t {
     } else {
         gz::LEVEL_DEFAULT
     };
-    let gzip = !ranged && gz::accepted(header(r, c"Accept-Encoding").as_deref());
+    // LazyTO mode serves raw bytes: the gzip arena (15 KB) on top of the
+    // relay link's buffers left lwIP and Wi-Fi without heap, and a transfer
+    // stalled in send for good (hardware, 2026-10-08: 167 failed allocations,
+    // heap down to 1.4 KB)
+    let gzip = !ranged
+        && !crate::lazyto::enabled()
+        && gz::accepted(header(r, c"Accept-Encoding").as_deref());
 
     let mut async_req: *mut httpd_req_t = std::ptr::null_mut();
     if httpd_req_async_handler_begin(r, &mut async_req) != ESP_OK || async_req.is_null() {
