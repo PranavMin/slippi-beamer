@@ -68,11 +68,21 @@ const DHCP_TIMEOUT: Duration = Duration::from_secs(30);
 const BACKOFF_MIN: Duration = Duration::from_secs(3);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
+/// How long failed joins stay a wait (Joining, no error) before they are an
+/// error. A router can refuse a station that lost power without leaving for
+/// about 40 s: on hardware (2026-10-08) a quick replug failed the 4-way
+/// handshake (reason 15) until 43 s every time, and the LED went red at 20 s
+/// for a join that then succeeded on its own. A wrong password still turns
+/// red, a minute in; the kiosk says "still joining" at the same point.
+const JOIN_GRACE: Duration = Duration::from_secs(60);
+
 pub struct Radio {
     wifi: BlockingWifi<EspWifi<'static>>,
     ssid: String,
     backoff: Duration,
     next_attempt: Instant,
+    /// when this run of failed joins began; `None` while joined
+    failing_since: Option<Instant>,
 }
 
 impl Radio {
@@ -103,6 +113,7 @@ impl Radio {
             ssid: String::new(),
             backoff: BACKOFF_MIN,
             next_attempt: Instant::now(),
+            failing_since: None,
         };
 
         let _ = radio.associate(hostname, join);
@@ -132,15 +143,21 @@ impl Radio {
     fn reset_backoff(&mut self) {
         self.backoff = BACKOFF_MIN;
         self.next_attempt = Instant::now();
+        self.failing_since = None;
     }
 
     fn defer_retry(&mut self, label: ErrorLabel) {
-        set_state(match label {
-            ErrorLabel::WifiTooFull => State::NoAddress,
-            _ => State::CantJoin,
-        });
-        let ssid = format!("ssid {:?}", self.ssid);
-        errors::error(Target::Late, label, "net", &[label.detail(), &ssid]);
+        let since = *self.failing_since.get_or_insert_with(Instant::now);
+        if label == ErrorLabel::WifiIssue && since.elapsed() < JOIN_GRACE {
+            set_state(State::Joining);
+        } else {
+            set_state(match label {
+                ErrorLabel::WifiTooFull => State::NoAddress,
+                _ => State::CantJoin,
+            });
+            let ssid = format!("ssid {:?}", self.ssid);
+            errors::error(Target::Late, label, "net", &[label.detail(), &ssid]);
+        }
 
         self.next_attempt = Instant::now() + self.backoff;
         log::warn!(
