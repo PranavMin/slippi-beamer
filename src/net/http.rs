@@ -66,20 +66,15 @@ pub(super) fn publish_stats(s: TransferStats) {
     } else {
         String::from("identity")
     };
+    // under the log capture's 192 bytes: a longer line loses its tail
     log::info!(
-        "transfer: {} B in {} us ({} chunks) {coding} read {} us (max {}) write {} us (max {}) \
-         ro_lock {} us mount {} us sd_wait {} us (max {})",
+        "transfer: stack left {} B, {} B in {} ms, {coding}, read {} ms, write {} ms, sd_wait {} ms",
+        s.stack_left,
         s.bytes,
-        s.total_us,
-        s.chunks,
-        s.read_us,
-        s.read_max_us,
-        s.write_us,
-        s.write_max_us,
-        s.lock_us,
-        s.mount_us,
-        s.sd_wait_us,
-        s.sd_wait_max_us
+        s.total_us / 1000,
+        s.read_us / 1000,
+        s.write_us / 1000,
+        s.sd_wait_us / 1000
     );
 }
 

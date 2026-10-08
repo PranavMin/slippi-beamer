@@ -20,7 +20,11 @@ use crate::storage::SdCard;
 use super::gz;
 use super::http;
 
-const STACK: usize = 6144;
+/// LazyTO mode hashes on this stack (mbedtls SHA-256) and looks the file
+/// up first: at 6 KB a transfer that went out whole hung in the stats log
+/// that follows it, the deepest call of a transfer (hardware, 2026-10-08).
+/// The stats line logs the margin.
+const STACK: usize = 8192;
 const MAX_NAME: usize = 96;
 const MAX_HDR: usize = 128;
 const WINDOW_WAIT: Duration = Duration::from_secs(2);
