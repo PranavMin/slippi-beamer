@@ -4,7 +4,7 @@ pub mod gz;
 pub mod http;
 pub mod mdns;
 pub mod relay;
-mod transfer;
+pub(crate) mod transfer;
 pub mod wifi;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
@@ -17,7 +17,7 @@ use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::{
-    CONFIG_LWIP_MAX_ACTIVE_TCP, CONFIG_LWIP_TCP_MSS, CONFIG_LWIP_TCP_SND_BUF_DEFAULT,
+    CONFIG_LWIP_TCP_MSS, CONFIG_LWIP_TCP_SND_BUF_DEFAULT,
 };
 
 use crate::config::Outcome;
@@ -53,6 +53,7 @@ fn set_result(r: NetResult) {
 }
 
 pub fn give_up() {
+    wifi::set_state(wifi::State::Radio);
     down(NetResult::Fail);
 }
 
@@ -101,7 +102,12 @@ pub fn retry_after_secs() -> u64 {
 
 const SEGMENT: u32 = (16 + 56 + CONFIG_LWIP_TCP_MSS + 4) + (16 + 4);
 pub const CONN_HEAP: u32 = (CONFIG_LWIP_TCP_SND_BUF_DEFAULT / CONFIG_LWIP_TCP_MSS) * SEGMENT;
-pub const HEAP_FLOOR: u32 = CONFIG_LWIP_MAX_ACTIVE_TCP * CONN_HEAP + 8 * 1024;
+/// Connections that carry a send buffer at once: a download and one other
+/// (a status request, or LazyTO's relay link). lwIP allows more active
+/// connections than this (sdkconfig.defaults), but the rest carry a request
+/// or a reply of a few hundred bytes.
+const BUSY_TCP: u32 = 2;
+pub const HEAP_FLOOR: u32 = BUSY_TCP * CONN_HEAP + 8 * 1024;
 
 pub const BLOCK_FLOOR: u32 = 3 * SEGMENT;
 
@@ -132,6 +138,13 @@ impl Transfer {
         TRANSFERS.fetch_add(1, Ordering::Relaxed);
         Transfer
     }
+}
+
+/// A transfer whose size was not known when it began (LazyTO mode serves
+/// any file by name): its projected end, for `Retry-After`.
+pub fn project(bytes: u64) {
+    let projected_us = bytes * 1_000_000 / SPEED_BPS;
+    *FINISH_US.lock().unwrap_or_else(|e| e.into_inner()) = http::now_us() as u64 + projected_us;
 }
 
 impl Drop for Transfer {
@@ -217,6 +230,7 @@ fn run(modem: Modem<'static>, nvs: EspDefaultNvsPartition, sd: Arc<SdCard>, plan
     let sysloop = match EspSystemEventLoop::take() {
         Ok(l) => l,
         Err(e) => {
+            wifi::set_state(wifi::State::Radio);
             fail(
                 crate::status::ErrorLabel::RadioFailure,
                 &["the system event loop would not start", &format!("{e}")],
@@ -227,6 +241,7 @@ fn run(modem: Modem<'static>, nvs: EspDefaultNvsPartition, sd: Arc<SdCard>, plan
     };
 
     let Some(join) = plan.join else {
+        wifi::set_state(wifi::State::NoSsid);
         log::info!("no SSID configured: this station has no network");
         crate::status::set_net(crate::status::Net::NotSet);
         down(NetResult::Offline);
@@ -273,7 +288,11 @@ fn run(modem: Modem<'static>, nvs: EspDefaultNvsPartition, sd: Arc<SdCard>, plan
         ssid: Some(join.ssid.clone()),
     });
 
-    announce::open(&plan.station, &crate::name::current());
+    // LazyTO mode: the relay learns a beamer's address from its sync, so the
+    // multicast announces (and their socket) are left out
+    if !crate::lazyto::enabled() {
+        announce::open(&plan.station, &crate::name::current());
+    }
 
     if server.is_none() {
         set_result(NetResult::Fail);

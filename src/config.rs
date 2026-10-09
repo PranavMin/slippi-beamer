@@ -48,8 +48,13 @@ pub const REPLAY_CAP_MAX: u32 = 512;
 pub const LED_PCT_DEFAULT: u8 = 20;
 pub const LED_PCT_MAX: u8 = 100;
 pub const DEBUG_DEFAULT: bool = false;
-pub const FLIP_SCREEN_DEFAULT: bool = false;
+/// LazyTO's beamers stand behind the Wii with the screen upside down.
+pub const FLIP_SCREEN_DEFAULT: bool = true;
 pub const LAZYTO_DEFAULT: bool = false;
+/// LAZYTO-SECRET: LazyTO's relay secret, as the relay's own config checks
+/// it (8 to 16 letters, digits, `-` or `_`). `SECRET_LEN` in relay_proto.h.
+pub const SECRET_MIN: usize = 8;
+pub const SECRET_MAX: usize = 16;
 
 const STRICT_FLAGS: bool = true;
 
@@ -144,6 +149,44 @@ impl Psk {
             ));
         }
         Ok(Psk(s.to_owned()))
+    }
+}
+
+/// LazyTO's relay secret (LAZYTO.md), NUL-padded. Never sent, served or
+/// logged (`Debug` hides it): `relay_auth` carries a key derived from it
+/// (`lazyto::sync::auth_key`), and it keys the sync reply's signature.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Secret([u8; SECRET_MAX]);
+
+impl Secret {
+    pub fn new(s: &str) -> Result<Self, ConfigError> {
+        let len = s.len();
+        let ok = (SECRET_MIN..=SECRET_MAX).contains(&len)
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if !ok {
+            // the value itself stays out of error.txt
+            return Err(ConfigError::new(
+                format!(
+                    "LAZYTO-SECRET must be {SECRET_MIN}-{SECRET_MAX} letters, digits, - or _ (it has {len} characters)."
+                ),
+                "Copy it again from the LazyTO app into CONFIG/config.txt.",
+            ));
+        }
+        let mut b = [0u8; SECRET_MAX];
+        b[..len].copy_from_slice(s.as_bytes());
+        Ok(Secret(b))
+    }
+
+    /// The secret's 16 bytes, NUL-padded: the key of both HMACs.
+    pub fn padded(&self) -> &[u8; SECRET_MAX] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(..)")
     }
 }
 
@@ -299,6 +342,7 @@ pub struct Config {
     flip_screen: bool,
     debug: bool,
     lazyto: bool,
+    secret: Option<Secret>,
 }
 
 impl Config {
@@ -328,6 +372,10 @@ impl Config {
 
     pub fn lazyto(&self) -> bool {
         self.lazyto
+    }
+
+    pub fn secret(&self) -> Option<Secret> {
+        self.secret
     }
 
     pub fn hostname(&self, station_id: &str) -> String {
@@ -433,6 +481,17 @@ impl Config {
             }
         };
 
+        let secret = match raw.lazyto_secret.as_deref() {
+            None | Some("") => None,
+            Some(s) => match Secret::new(s) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    errors.push(e);
+                    None
+                }
+            },
+        };
+
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -455,6 +514,7 @@ impl Config {
             flip_screen,
             debug,
             lazyto,
+            secret,
         })
     }
 }
@@ -499,6 +559,8 @@ pub struct Settings {
     pub flip_screen: bool,
     pub debug: bool,
     pub lazyto: bool,
+    /// LAZYTO-SECRET; follows edits live, unlike `lazyto`
+    pub secret: Option<Secret>,
 }
 
 impl Settings {
@@ -511,6 +573,7 @@ impl Settings {
                 flip_screen: cfg.flip_screen(),
                 debug: cfg.debug(),
                 lazyto: cfg.lazyto(),
+                secret: cfg.secret(),
             },
             Outcome::Rejected(_) | Outcome::Unreadable(_) => Settings {
                 num_replays: KEEP_DEFAULT,
@@ -519,6 +582,7 @@ impl Settings {
                 flip_screen: FLIP_SCREEN_DEFAULT,
                 debug: DEBUG_DEFAULT,
                 lazyto: LAZYTO_DEFAULT,
+                secret: None,
             },
         }
     }
@@ -537,6 +601,7 @@ struct Raw {
     flip_screen: Option<String>,
     debug: Option<String>,
     lazyto: Option<String>,
+    lazyto_secret: Option<String>,
 }
 
 impl Raw {
@@ -566,6 +631,7 @@ impl Raw {
                 "FLIP-SCREEN" | "FLIP_SCREEN" => raw.flip_screen = Some(value),
                 "DEBUG" => raw.debug = Some(value),
                 "LAZYTO" => raw.lazyto = Some(value),
+                "LAZYTO-SECRET" | "LAZYTO_SECRET" => raw.lazyto_secret = Some(value),
                 _ => {}
             }
         }

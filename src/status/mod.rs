@@ -67,7 +67,8 @@ pub struct Detail {
     pub more: u32,
     pub warn: Option<WarningLabel>, // the most severe warning standing
     pub warn_more: u32,
-    pub relay: bool, // LazyTO mode only: the relay's beacon has been heard
+    pub relay: bool,          // LazyTO mode only: the relay's beacon has been heard
+    pub erasing: Option<u32>, // LazyTO mode only: the cold-boot erase, files left
 }
 
 static STATE: AtomicU8 = AtomicU8::new(State::Booting as u8);
@@ -152,6 +153,11 @@ pub fn ip() -> Option<Ipv4Addr> {
 
 pub fn set_relay(found: bool) {
     publish(|d| d.relay = found);
+}
+
+/// LazyTO mode's cold-boot erase: ERASING n while it runs, during Booting.
+pub fn set_erasing(left: Option<u32>) {
+    publish(|d| d.erasing = left);
 }
 
 pub fn set_signal(weak: bool) {
@@ -378,6 +384,7 @@ fn render(pins: Pins) {
                 last_frame = u64::MAX; // the animation owes a fresh frame
             }
             let frame = match state {
+                State::Booting if local.erasing.is_some() => None, // the count stays up
                 State::Booting => Some(boot_frame(ms)),
                 State::HealthyBusy | State::WarningBusy => Some(spinner_frame(ms)),
                 _ => None,

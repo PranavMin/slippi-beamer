@@ -30,9 +30,11 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mbedtls/sha256.h"
 
 static const char *TAG = "beamer_lazyto";
 
@@ -48,6 +50,7 @@ _Static_assert(BEAMER_LAZYTO_TELE_MAX == TELE_BYTES - sizeof(struct beamer_tele_
 _Static_assert(BEAMER_MB_RESP + BEAMER_MB_RESP_SECTORS <= BEAMER_MB_TELE, "layout overlaps");
 _Static_assert(BEAMER_MB_TELE + BEAMER_MB_TELE_SECTORS <= BEAMER_MB_SECTORS, "layout overflows");
 _Static_assert(sizeof(struct beamer_hello) <= SECTOR, "hello fits a sector");
+_Static_assert(BEAMER_LAZYTO_FW_BUILD >= BEAMER_FW_MIN, "a v2 kernel accepts this firmware");
 
 static atomic_bool s_on;
 static uint32_t s_first; // set once by beamer_lazyto_install, before the USB bind
@@ -63,6 +66,7 @@ typedef struct
     uint8_t req[SECTOR];                       // under s_mux: as last written
     uint8_t tele[TELE_BYTES];                  // under s_mux: as last written
     uint8_t resp_body[BEAMER_LAZYTO_RESP_MAX]; // the response seqlock
+    mbedtls_sha256_context sha[BEAMER_LAZYTO_SHA_SLOTS]; // one task per slot
 } mailbox_t;
 
 static mailbox_t *s_mb;
@@ -140,10 +144,16 @@ bool beamer_lazyto_install(uint32_t first)
     s_first = first;
     s_wake = xSemaphoreCreateBinaryStatic(&s_wake_buf);
 
+    for (uint32_t i = 0; i < BEAMER_LAZYTO_SHA_SLOTS; i++)
+    {
+        mbedtls_sha256_init(&s_mb->sha[i]);
+    }
+
+    // until the relay task's first update: no station, joining the Wi-Fi
     memset(s_hello, 0, sizeof(s_hello));
     memcpy(s_hello + offsetof(struct beamer_hello, magic), "LAZYTOMB", 8);
     s_hello[offsetof(struct beamer_hello, version)] = BEAMER_MB_VERSION;
-    wr16(s_hello + offsetof(struct beamer_hello, station), 1);
+    s_hello[offsetof(struct beamer_hello, wifi)] = WIFI_JOINING;
     wr32(s_hello + offsetof(struct beamer_hello, fw_build), BEAMER_LAZYTO_FW_BUILD);
 
     atomic_store(&s_on, true);
@@ -157,15 +167,65 @@ bool beamer_lazyto_installed(void)
     return atomic_load(&s_on);
 }
 
-void beamer_lazyto_set_hello(uint8_t flags, uint16_t station, uint32_t relay_ip,
-                             uint16_t relay_port)
+void beamer_lazyto_set_hello(const beamer_lazyto_hello_t *h)
+{
+    if (h == NULL)
+    {
+        return;
+    }
+    portENTER_CRITICAL(&s_mux);
+    s_hello[offsetof(struct beamer_hello, flags)] = h->flags;
+    wr16(s_hello + offsetof(struct beamer_hello, station), h->station);
+    wr32(s_hello + offsetof(struct beamer_hello, relay_ip), h->relay_ip);
+    wr16(s_hello + offsetof(struct beamer_hello, relay_port), h->relay_port);
+    s_hello[offsetof(struct beamer_hello, wifi)] = h->wifi;
+    s_hello[offsetof(struct beamer_hello, storage)] = h->storage;
+    s_hello[offsetof(struct beamer_hello, last_result)] = h->last_result;
+    wr16(s_hello + offsetof(struct beamer_hello, beacon_age_s), h->beacon_age_s);
+    portEXIT_CRITICAL(&s_mux);
+}
+
+bool beamer_lazyto_request_pending(void)
 {
     portENTER_CRITICAL(&s_mux);
-    s_hello[offsetof(struct beamer_hello, flags)] = flags;
-    wr16(s_hello + offsetof(struct beamer_hello, station), station);
-    wr32(s_hello + offsetof(struct beamer_hello, relay_ip), relay_ip);
-    wr16(s_hello + offsetof(struct beamer_hello, relay_port), relay_port);
+    const bool pending = s_req_pending;
     portEXIT_CRITICAL(&s_mux);
+    return pending;
+}
+
+bool beamer_lazyto_sha_begin(uint32_t slot)
+{
+    if (s_mb == NULL || slot >= BEAMER_LAZYTO_SHA_SLOTS)
+    {
+        return false;
+    }
+    mbedtls_sha256_free(&s_mb->sha[slot]);
+    mbedtls_sha256_init(&s_mb->sha[slot]);
+    return mbedtls_sha256_starts(&s_mb->sha[slot], 0) == 0;
+}
+
+void beamer_lazyto_sha_update(uint32_t slot, const uint8_t *data, size_t len)
+{
+    if (s_mb == NULL || slot >= BEAMER_LAZYTO_SHA_SLOTS || len == 0)
+    {
+        return;
+    }
+    mbedtls_sha256_update(&s_mb->sha[slot], data, len);
+}
+
+void beamer_lazyto_sha_finish(uint32_t slot, uint8_t out[32])
+{
+    if (s_mb == NULL || slot >= BEAMER_LAZYTO_SHA_SLOTS)
+    {
+        memset(out, 0, 32);
+        return;
+    }
+    mbedtls_sha256_finish(&s_mb->sha[slot], out);
+}
+
+void beamer_lazyto_random(uint8_t *out, size_t len)
+{
+    esp_fill_random(out, len);
 }
 
 uint32_t beamer_lazyto_wait(uint32_t timeout_ms)

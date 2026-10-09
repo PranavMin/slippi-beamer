@@ -516,7 +516,9 @@ impl Summary {
     }
 }
 
-fn partition() -> Option<EspNvsPartition<NvsCustom>> {
+/// The `jrnl` NVS partition, taken once; LazyTO mode keeps its own namespace
+/// on it (`lazyto::store`).
+pub(crate) fn partition() -> Option<EspNvsPartition<NvsCustom>> {
     static PART: std::sync::OnceLock<Option<EspNvsPartition<NvsCustom>>> =
         std::sync::OnceLock::new();
     PART.get_or_init(|| match EspNvsPartition::<NvsCustom>::take(PARTITION) {
@@ -754,6 +756,20 @@ pub fn heap_now() -> (u32, u32) {
 }
 
 static HEAP_LOW: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// LazyTO mode's minute line: the heap, failed allocations, the relay task's
+/// stack margin and where a transfer in progress is.
+fn heartbeat() {
+    let (free, largest) = heap_now();
+    let oom = crate::net::oom_count();
+    let stack = crate::net::relay::stack_note().unwrap_or(0);
+    let transfer = crate::net::transfer::progress_note().unwrap_or_else(|| "idle".to_owned());
+    // short: the log capture cuts a longer line, newline and all
+    log::info!(
+        "hb: heap {free}/{largest} low {} oom {oom}; relay stack {stack}; xfer {transfer}",
+        heap_low()
+    );
+}
 
 pub fn heap_checkin() {
     let (_, largest) = heap_now();
@@ -1207,7 +1223,14 @@ pub fn spawn() -> anyhow::Result<()> {
                             summary.persist_fails += 1;
                         }
                     }
-                    summary.report("this boot, so far");
+                    if crate::lazyto::enabled() {
+                        // one line: the whole summary every minute pushes
+                        // everything else out of the 4 KB log tail, and the
+                        // next boot shows it from NVS anyway
+                        heartbeat();
+                    } else {
+                        summary.report("this boot, so far");
+                    }
                     last_persist = Instant::now();
                     dirty = false;
                 }

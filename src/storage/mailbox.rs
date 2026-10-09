@@ -6,11 +6,14 @@ use std::net::SocketAddrV4;
 use std::time::Duration;
 
 use esp_idf_svc::sys::lazyto::{
-    beamer_lazyto_install, beamer_lazyto_installed, beamer_lazyto_resp_begin,
-    beamer_lazyto_resp_commit, beamer_lazyto_set_hello, beamer_lazyto_stats, beamer_lazyto_stats_t,
+    beamer_lazyto_hello_t, beamer_lazyto_install, beamer_lazyto_installed, beamer_lazyto_random,
+    beamer_lazyto_request_pending, beamer_lazyto_resp_begin, beamer_lazyto_resp_commit,
+    beamer_lazyto_set_hello, beamer_lazyto_sha_begin, beamer_lazyto_sha_finish,
+    beamer_lazyto_sha_update, beamer_lazyto_stats, beamer_lazyto_stats_t,
     beamer_lazyto_take_request, beamer_lazyto_take_telemetry, beamer_lazyto_wait,
     BEAMER_LAZYTO_EV_REQUEST, BEAMER_LAZYTO_EV_TELEMETRY, BEAMER_LAZYTO_REQ_MAX,
-    BEAMER_LAZYTO_RESP_MAX, BEAMER_LAZYTO_TELE_MAX, BEAMER_MB_SECTORS,
+    BEAMER_LAZYTO_RESP_MAX, BEAMER_LAZYTO_SHA_SERVE, BEAMER_LAZYTO_SHA_SYNC,
+    BEAMER_LAZYTO_TELE_MAX, BEAMER_MB_SECTORS,
 };
 
 pub const SECTORS: u32 = BEAMER_MB_SECTORS;
@@ -29,9 +32,36 @@ pub fn installed() -> bool {
     unsafe { beamer_lazyto_installed() }
 }
 
-pub fn set_hello(flags: u8, station: u16, relay: Option<SocketAddrV4>) {
-    let (ip, port) = relay.map_or((0, 0), |r| (u32::from(*r.ip()), r.port()));
-    unsafe { beamer_lazyto_set_hello(flags, station, ip, port) }
+/// HELLO's live fields (`beamer_hello` v2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Hello {
+    pub flags: u8,
+    pub station: u16,
+    pub relay: Option<SocketAddrV4>,
+    pub wifi: u8,
+    pub storage: u8,
+    pub last_result: u8,
+    pub beacon_age_s: u16,
+}
+
+pub fn set_hello(h: &Hello) {
+    let (relay_ip, relay_port) = h.relay.map_or((0, 0), |r| (u32::from(*r.ip()), r.port()));
+    let raw = beamer_lazyto_hello_t {
+        flags: h.flags,
+        station: h.station,
+        relay_ip,
+        relay_port,
+        wifi: h.wifi,
+        storage: h.storage,
+        last_result: h.last_result,
+        beacon_age_s: h.beacon_age_s,
+    };
+    unsafe { beamer_lazyto_set_hello(&raw) }
+}
+
+/// A request is waiting: the relay task's own sync gives way to it.
+pub fn request_pending() -> bool {
+    unsafe { beamer_lazyto_request_pending() }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -99,4 +129,52 @@ pub fn stats() -> beamer_lazyto_stats_t {
     let mut s = beamer_lazyto_stats_t::default();
     unsafe { beamer_lazyto_stats(&mut s) };
     s
+}
+
+/// Which SHA-256 context: one per task that hashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShaSlot {
+    /// the transfer task, hashing the replay it serves
+    Serve,
+    /// the relay task, checking a sync reply's signature
+    Sync,
+}
+
+impl ShaSlot {
+    fn raw(self) -> u32 {
+        match self {
+            ShaSlot::Serve => BEAMER_LAZYTO_SHA_SERVE,
+            ShaSlot::Sync => BEAMER_LAZYTO_SHA_SYNC,
+        }
+    }
+}
+
+/// One SHA-256 computation on the SHA accelerator. `None` when the mailbox
+/// (whose heap block holds the contexts) is not installed.
+pub struct Sha {
+    slot: u32,
+}
+
+impl Sha {
+    pub fn begin(slot: ShaSlot) -> Option<Sha> {
+        let slot = slot.raw();
+        unsafe { beamer_lazyto_sha_begin(slot) }.then_some(Sha { slot })
+    }
+}
+
+impl crate::lazyto::hmac::Sha256 for Sha {
+    fn update(&mut self, data: &[u8]) {
+        unsafe { beamer_lazyto_sha_update(self.slot, data.as_ptr(), data.len()) }
+    }
+
+    fn finish(self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        unsafe { beamer_lazyto_sha_finish(self.slot, out.as_mut_ptr()) };
+        out
+    }
+}
+
+/// Random bytes from the hardware RNG.
+pub fn random(out: &mut [u8]) {
+    unsafe { beamer_lazyto_random(out.as_mut_ptr(), out.len()) }
 }

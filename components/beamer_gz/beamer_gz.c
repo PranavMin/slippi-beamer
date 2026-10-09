@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "esp_heap_caps_init.h"
 #include "esp_log.h"
 #include "zlib.h"
 
@@ -19,6 +20,7 @@ static size_t s_high;
 static z_stream s_z;
 static bool s_open;
 static bool s_reported;
+static bool s_donated;
 
 static void *gz_alloc(void *opaque, unsigned items, unsigned size)
 {
@@ -50,6 +52,11 @@ static void gz_free(void *opaque, void *addr)
 
 int beamer_gz_begin(int level)
 {
+    if (s_donated)
+    {
+        ESP_LOGE(TAG, "gzip asked for after its arena went to the heap");
+        return -1;
+    }
     if (s_open)
     {
         beamer_gz_end();
@@ -132,4 +139,25 @@ size_t beamer_gz_arena_size(void)
 size_t beamer_gz_arena_high_water(void)
 {
     return s_high;
+}
+
+bool beamer_gz_donate_arena(void)
+{
+    if (s_donated)
+    {
+        return true;
+    }
+    if (s_open)
+    {
+        return false;
+    }
+    esp_err_t e = heap_caps_add_region((intptr_t)s_arena, (intptr_t)s_arena + sizeof(s_arena));
+    if (e != ESP_OK)
+    {
+        ESP_LOGE(TAG, "arena not added to the heap: %s", esp_err_to_name(e));
+        return false;
+    }
+    s_donated = true;
+    ESP_LOGI(TAG, "gzip off: its %u B arena went to the heap", (unsigned)sizeof(s_arena));
+    return true;
 }

@@ -16,13 +16,15 @@ static API_LOCK: Mutex<()> = Mutex::new(());
 const CHUNK: usize = 2 * 1024;
 const GZ_OUT: usize = 4 * 1024;
 
+/// The transfer task's read chunk and gzip output. LazyTO's inventory also
+/// borrows it, when no replay is being served, to count the FAT.
 #[repr(align(64))]
-pub(super) struct Scratch {
-    pub(super) read: [u8; CHUNK],
-    pub(super) out: [u8; GZ_OUT],
+pub(crate) struct Scratch {
+    pub(crate) read: [u8; CHUNK],
+    pub(crate) out: [u8; GZ_OUT],
 }
 
-pub(super) static SCRATCH: Mutex<Scratch> = Mutex::new(Scratch {
+pub(crate) static SCRATCH: Mutex<Scratch> = Mutex::new(Scratch {
     read: [0; CHUNK],
     out: [0; GZ_OUT],
 });
@@ -64,20 +66,15 @@ pub(super) fn publish_stats(s: TransferStats) {
     } else {
         String::from("identity")
     };
+    // under the log capture's 192 bytes: a longer line loses its tail
     log::info!(
-        "transfer: {} B in {} us ({} chunks) {coding} read {} us (max {}) write {} us (max {}) \
-         ro_lock {} us mount {} us sd_wait {} us (max {})",
+        "transfer: stack left {} B, {} B in {} ms, {coding}, read {} ms, write {} ms, sd_wait {} ms",
+        s.stack_left,
         s.bytes,
-        s.total_us,
-        s.chunks,
-        s.read_us,
-        s.read_max_us,
-        s.write_us,
-        s.write_max_us,
-        s.lock_us,
-        s.mount_us,
-        s.sd_wait_us,
-        s.sd_wait_max_us
+        s.total_us / 1000,
+        s.read_us / 1000,
+        s.write_us / 1000,
+        s.sd_wait_us / 1000
     );
 }
 
@@ -97,6 +94,14 @@ pub fn serve(sd: Arc<SdCard>) -> anyhow::Result<EspHttpServer<'static>> {
         core: Some(Core::Core0),
         stack_size: 8192, // determined experimentally - lower panics...
         uri_match_wildcard: true,
+        // Two, in LazyTO mode too: with one, a connection arriving while a
+        // download held it (async, so never purged) left the listen socket
+        // readable and unaccepted, and this task (priority 5, core 0) spun
+        // on select for good, starving the transfer worker that would have
+        // freed it (hardware, 2026-10-08). With two, the second session is
+        // never async and LRU purge always has a victim. lwIP has four
+        // active TCP connections (sdkconfig.defaults): both of these, a
+        // backlogged one and the relay link.
         max_open_sockets: 2,
         lru_purge_enable: true,
         ..Default::default()
@@ -161,6 +166,12 @@ pub fn serve(sd: Arc<SdCard>) -> anyhow::Result<EspHttpServer<'static>> {
 
     let reset_card = card.clone();
     server.fn_handler::<anyhow::Error, _>("/reset-beamer", Method::Post, move |req| {
+        // LazyTO mode: the wipe withdraws the medium under a mounted Wii,
+        // whose FatFs never notices; the beamer erases collected replays
+        // itself, at power-on (LAZYTO.md)
+        if crate::lazyto::enabled() {
+            return respond_json(req, 403, ERR_LAZYTO_RESET);
+        }
         if req.header("X-Beamer-Confirm") != Some("reset") {
             return respond_json(req, 400, ERR_CONFIRM);
         }
@@ -268,6 +279,8 @@ pub(super) const ERR_VOLUME: &[u8] =
     br#"{"ok": false, "error": "the replay volume is busy; retry shortly"}"#;
 pub(super) const ERR_STAT: &[u8] = br#"{"ok": false, "error": "that replay could not be read"}"#;
 pub(super) const ERR_RANGE: &[u8] = br#"{"ok": false, "error": "range not satisfiable"}"#;
+pub(super) const ERR_LIVE: &[u8] =
+    br#"{"ok": false, "error": "this replay is being recorded; retry once the game ends"}"#;
 pub(super) const ERR_LOW_MEMORY: &[u8] =
     br#"{"ok": false, "error": "station is low on memory; retry shortly"}"#;
 
@@ -277,6 +290,7 @@ pub(super) const ERR_SERVING: &[u8] =
     br#"{"ok": false, "error": "a replay is being served right now; retry once it finishes"}"#;
 const ERR_GAME_LIVE: &[u8] =
     br#"{"ok": false, "error": "a game is being recorded right now; retry once it finishes"}"#;
+const ERR_LAZYTO_RESET: &[u8] = br#"{"ok": false, "error": "reset is off in LazyTO mode: this beamer erases the replays the laptop has collected at its next power-on"}"#;
 const ERR_CONFIRM: &[u8] = br#"{"ok": false, "error": "POST /reset-beamer needs the header 'X-Beamer-Confirm: reset'. It erases every replay on this station."}"#;
 
 pub(super) const RETRY_AFTER_SECONDS_STR: &str = "15";
@@ -322,16 +336,64 @@ fn with_status_body<R>(f: impl FnOnce(&report::Buf<{ report::STATUS_CAP }>) -> R
                 super::NetResult::Offline => report::Health::Ok,
                 super::NetResult::Fail => report::Health::Error,
             },
-            super::relay::snapshot().map(|r| report::LazytoInfo {
-                relay: r.relay,
-                requests_served: r.served,
-                last_result: r.last,
-                mailbox: r.mailbox,
-            }),
+            lazyto_info(),
             &mut buf,
         );
     });
     f(&buf)
+}
+
+fn lazyto_info() -> Option<report::LazytoInfo> {
+    use crate::lazyto;
+
+    let r = super::relay::snapshot()?;
+    let inv = lazyto::inventory::snapshot();
+    let erase = lazyto::erase::report();
+    let sync = lazyto::sync::status();
+    Some(report::LazytoInfo {
+        fw_build: esp_idf_svc::sys::lazyto::BEAMER_LAZYTO_FW_BUILD,
+        station_set: crate::name::is_set(),
+        secret: lazyto::secret().is_some(),
+        wifi: lazyto::wifi_name(lazyto::wifi_state()),
+        storage: lazyto::storage_name(lazyto::storage_state()),
+        relay: r.relay,
+        beacon_age_s: r.beacon_age_s,
+        requests_served: r.served,
+        last_result: r.last,
+        telemetry_dropped: r.telemetry_dropped,
+        mailbox: r.mailbox,
+        inventory: inv.as_ref().filter(|s| s.passes > 0).map(|s| {
+            [
+                ("on_card", s.counts.on_card),
+                ("to_collect", s.counts.to_collect),
+                ("to_erase", s.counts.to_erase),
+                ("empty", s.counts.empty),
+                ("incomplete", s.counts.incomplete),
+                ("acks", lazyto::acks::count() as u32),
+            ]
+        }),
+        free_mb: inv.as_ref().and_then(|s| s.free_mb),
+        card_mb: inv.as_ref().map_or(0, |s| s.card_mb),
+        used_mb: inv.as_ref().map_or(0, |s| s.used_mb),
+        erase_counts: [
+            ("erased", erase.erased as u32),
+            ("erased_empty", erase.erased_empty as u32),
+            ("erase_ms", erase.erase_ms as u32),
+            ("erase_left", erase.erase_left as u32),
+        ],
+        erase_flags: [
+            ("cold", lazyto::cold_boot()),
+            ("failed", erase.failed),
+            ("acks_dropped", erase.acks_dropped),
+        ],
+        sync_counts: [
+            ("attempts", sync.attempts),
+            ("ok", sync.ok),
+            ("acked", sync.acked),
+        ],
+        sync_last: sync.last.map(|o| o.name()),
+        sync_last_age_s: sync.last_at.map(|t| t.elapsed().as_secs()),
+    })
 }
 
 fn respond_json<C>(

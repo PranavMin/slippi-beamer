@@ -4,13 +4,17 @@ first hardware test. Linux only, no dependencies; run as root (or a user who
 can open the block device).
 
     sudo tools/lazyto_host.py /dev/sdX
-    sudo tools/lazyto_host.py /dev/sdX --list-sets --secret S --station N
+    sudo tools/lazyto_host.py /dev/sdX --list-sets
 
 It reads the MBR, finds the first FAT32 partition's end (where the mailbox
-starts, exactly as the firmware does), and prints the HELLO sector. With
+starts, exactly as the firmware does), and prints the HELLO sector (mailbox
+v2: flags, station, Wi-Fi and storage state, last result, beacon age). With
 --list-sets it writes a CMD_LIST_SETS request to the REQUEST sector and polls
 the RESPONSE sector until the Beamer answers, then prints the transport
 result and the relay's status, message and sets.
+
+As the LazyTO kernel does, it stamps relay_hdr.station from the HELLO and
+sends no relay_auth: the Beamer puts its own LAZYTO-SECRET in front.
 
 Every read and write is O_DIRECT, so the kernel's page cache never answers
 for the Beamer: the mailbox changes under it.
@@ -118,42 +122,48 @@ def mailbox_start(disk: Disk) -> int:
     sys.exit("no FAT32 partition in the MBR")
 
 
-def show_hello(p: Proto, sector: bytes) -> bool:
+def show_hello(p: Proto, sector: bytes):
+    """Prints HELLO; returns its station when the Beamer has one (else None),
+    or exits when there is no v2 mailbox."""
     h = "beamer_hello"
     magic = sector[p.off(h, "magic") : p.off(h, "magic") + 8]
     version = sector[p.off(h, "version")]
-    if magic != b"LAZYTOMB" or version != p["BEAMER_MB_VERSION"]:
-        print(f"HELLO: no LazyTO mailbox here (magic {magic!r}, version {version})")
-        return False
+    fw_build = be32(sector, p.off(h, "fw_build"))
+    if magic != b"LAZYTOMB":
+        sys.exit(f"HELLO: no LazyTO mailbox here (magic {magic!r})")
+    if version != p["BEAMER_MB_VERSION"] or fw_build < p["BEAMER_FW_MIN"]:
+        sys.exit(
+            f"HELLO: mailbox version {version}, fw_build {fw_build}; this tool speaks "
+            f"version {p['BEAMER_MB_VERSION']} (fw_build {p['BEAMER_FW_MIN']}+): reflash the Beamer"
+        )
     flags = sector[p.off(h, "flags")]
     names = [n for v, n in sorted(p.names("BF_").items()) if flags & v]
     ip = be32(sector, p.off(h, "relay_ip"))
     port = be16(sector, p.off(h, "relay_port"))
     relay = f"{ip >> 24}.{(ip >> 16) & 255}.{(ip >> 8) & 255}.{ip & 255}:{port}" if ip else "unknown"
+    station = be16(sector, p.off(h, "station")) if flags & p["BF_STATION_SET"] else None
+    wifi = sector[p.off(h, "wifi")]
+    storage = sector[p.off(h, "storage")]
+    last = sector[p.off(h, "last_result")]
+    age = be16(sector, p.off(h, "beacon_age_s"))
     print(
-        f"HELLO: version {version}, flags 0x{flags:02x} [{' '.join(names) or '-'}], "
-        f"station {be16(sector, p.off(h, 'station'))}, relay {relay}, "
-        f"fw_build {be32(sector, p.off(h, 'fw_build'))}"
+        f"HELLO: version {version}, fw_build {fw_build}, flags 0x{flags:02x} [{' '.join(names) or '-'}], "
+        f"station {station if station is not None else 'none'}, relay {relay}"
+        + (f" (beacon {age} s ago)" if flags & p["BF_RELAY"] else "")
+        + f", wifi {p.names('WIFI_').get(wifi, wifi)}, storage {p.names('STORE_').get(storage, storage)}, "
+        f"last result {p.names('BR_').get(last, last)}"
     )
-    return True
+    return station
 
 
-def list_sets_request(p: Proto, seq: int, secret: str, station: int) -> bytes:
-    auth = bytearray(p.size["relay_auth"])
-    auth[0], auth[1] = p["AUTH_MAGIC_0"], p["AUTH_MAGIC_1"]
-    s = secret.encode("ascii")
-    if len(s) > p["SECRET_LEN"]:
-        sys.exit(f"--secret is at most {p['SECRET_LEN']} characters")
-    o = p.off("relay_auth", "secret")
-    auth[o : o + len(s)] = s
-
+def list_sets_request(p: Proto, seq: int, station: int) -> bytes:
     hdr = bytearray(p.size["relay_hdr"])
     hdr[0], hdr[1] = p["RELAY_MAGIC_0"], p["RELAY_MAGIC_1"]
     hdr[p.off("relay_hdr", "version")] = p["RELAY_PROTO_VERSION"]
     hdr[p.off("relay_hdr", "cmd")] = p["CMD_LIST_SETS"]
     struct.pack_into(">H", hdr, p.off("relay_hdr", "station"), station)
     struct.pack_into(">H", hdr, p.off("relay_hdr", "len"), 0)
-    body = bytes(auth + hdr)
+    body = bytes(hdr)  # mailbox v2: no relay_auth from the Wii side
 
     req = bytearray(p["BEAMER_SECTOR_SIZE"])
     req[0], req[1] = ord("M"), ord("Q")
@@ -196,7 +206,7 @@ def show_reply(p: Proto, reply: bytes):
         )
 
 
-def list_sets(p: Proto, disk: Disk, first: int, secret: str, station: int, timeout: float):
+def list_sets(p: Proto, disk: Disk, first: int, station: int, timeout: float):
     req_lba = first + p["BEAMER_MB_REQ"]
     resp_lba = first + p["BEAMER_MB_RESP"]
 
@@ -204,7 +214,7 @@ def list_sets(p: Proto, disk: Disk, first: int, secret: str, station: int, timeo
     seq = (last + 1) & 0xFFFFFFFF or 1  # never the last seq: the Beamer would take it for a retry
 
     t0 = time.monotonic()
-    disk.write(req_lba, list_sets_request(p, seq, secret, station))
+    disk.write(req_lba, list_sets_request(p, seq, station))
     print(f"request: seq {seq} written to lba {req_lba}")
 
     polls = 0
@@ -237,14 +247,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("device", help="the Beamer's block device, e.g. /dev/sdb (not a partition)")
     ap.add_argument("--list-sets", action="store_true", help="send CMD_LIST_SETS through the mailbox")
-    ap.add_argument("--secret", help="the relay's shared secret (RELAY_SECRET / secret=)")
-    ap.add_argument("--station", type=int, help="the station number to ask for")
+    ap.add_argument("--station", type=int, help="the station number to stamp (default: the Beamer's)")
     ap.add_argument("--timeout", type=float, default=3.0, help="seconds to wait for the answer (the Wii's budget is 3)")
     ap.add_argument("--proto", type=Path, default=HEADER, help="relay_proto.h to take the layout from")
     args = ap.parse_args()
-
-    if args.list_sets and (args.secret is None or args.station is None):
-        ap.error("--list-sets needs --secret and --station")
 
     p = Proto(args.proto)
     disk = Disk(args.device, write=args.list_sets)
@@ -253,11 +259,14 @@ def main():
 
     first = mailbox_start(disk)
     print(f"mailbox: lba {first}..{first + p['BEAMER_MB_SECTORS'] - 1}")
-    if not show_hello(p, disk.read(first + p["BEAMER_MB_HELLO"], 1)):
-        sys.exit(2)
+    station = show_hello(p, disk.read(first + p["BEAMER_MB_HELLO"], 1))
 
     if args.list_sets:
-        list_sets(p, disk, first, args.secret, args.station, args.timeout)
+        if args.station is not None:
+            station = args.station
+        if station is None:
+            sys.exit("the Beamer has no station number: press its button (or pass --station)")
+        list_sets(p, disk, first, station, args.timeout)
 
 
 if __name__ == "__main__":

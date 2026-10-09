@@ -1,5 +1,5 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -20,7 +20,11 @@ use crate::storage::SdCard;
 use super::gz;
 use super::http;
 
-const STACK: usize = 6144;
+/// LazyTO mode hashes on this stack (mbedtls SHA-256) and looks the file
+/// up first: at 6 KB a transfer that went out whole hung in the stats log
+/// that follows it, the deepest call of a transfer (hardware, 2026-10-08).
+/// The stats line logs the margin.
+const STACK: usize = 8192;
 const MAX_NAME: usize = 96;
 const MAX_HDR: usize = 128;
 const WINDOW_WAIT: Duration = Duration::from_secs(2);
@@ -43,6 +47,62 @@ static WAKE: Condvar = Condvar::new();
 static STOP: AtomicBool = AtomicBool::new(false);
 
 static BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Where the current transfer is, for the journal's heartbeat: a transfer
+/// that stops making progress shows the step it stopped in.
+static STEP: AtomicU8 = AtomicU8::new(STEP_IDLE);
+static STEP_BYTES: AtomicU32 = AtomicU32::new(0);
+static STEP_AT_MS: AtomicU32 = AtomicU32::new(0);
+const STEP_IDLE: u8 = 0;
+const STEP_OPEN: u8 = 1;
+const STEP_READ: u8 = 2;
+const STEP_HASH: u8 = 3;
+const STEP_SEND: u8 = 4;
+const STEP_FINISH: u8 = 5;
+const STEP_HASHED: u8 = 6;
+const STEP_STATS: u8 = 7;
+const STEP_COMPLETE: u8 = 8;
+const STEP_CLOSE: u8 = 9;
+const STEP_DROP: u8 = 10;
+const STEP_UNLOCK: u8 = 11;
+const STEP_CLOSE_FILE: u8 = 12;
+const STEP_UNMOUNT: u8 = 13;
+
+fn step(s: u8, bytes: u64) {
+    STEP.store(s, Ordering::Relaxed);
+    STEP_BYTES.store(bytes.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+    STEP_AT_MS.store((http::now_us() / 1000) as u32, Ordering::Relaxed);
+}
+
+/// The current transfer's step, bytes read so far and ms since it entered
+/// that step; `None` when no replay is being served.
+pub fn progress_note() -> Option<String> {
+    let s = STEP.load(Ordering::Relaxed);
+    if s == STEP_IDLE {
+        return None;
+    }
+    let name = match s {
+        STEP_OPEN => "open",
+        STEP_READ => "read",
+        STEP_HASH => "hash",
+        STEP_SEND => "send",
+        STEP_FINISH => "finish",
+        STEP_HASHED => "hash finish",
+        STEP_STATS => "stats",
+        STEP_COMPLETE => "async complete",
+        STEP_CLOSE => "session close",
+        STEP_DROP => "job drop",
+        STEP_UNLOCK => "scratch unlock",
+        STEP_CLOSE_FILE => "file close",
+        _ => "unmount",
+    };
+    let now = (http::now_us() / 1000) as u32;
+    let idle = now.wrapping_sub(STEP_AT_MS.load(Ordering::Relaxed));
+    Some(format!(
+        "{name} @{} B {idle} ms",
+        STEP_BYTES.load(Ordering::Relaxed)
+    ))
+}
 static SERVER_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 fn close_async_session(fd: c_int) {
@@ -98,13 +158,18 @@ fn worker(card: Arc<SdCard>) {
         };
 
         let raw = job.req;
+        step(STEP_OPEN, 0);
         if let Err(e) = run(&card, &job) {
             log::error!("{}: transfer failed: {e}", job.name);
         }
         let fd = unsafe { httpd_req_to_sockfd(raw) };
+        step(STEP_COMPLETE, 0);
         unsafe { httpd_req_async_handler_complete(raw) };
+        step(STEP_CLOSE, 0);
         close_async_session(fd);
+        step(STEP_DROP, 0);
         drop(job);
+        step(STEP_IDLE, 0);
         BUSY.store(false, Ordering::SeqCst);
     }
     log::info!("transfer worker down");
@@ -221,6 +286,23 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
             return Ok(());
         }
     };
+    let mut hashing = None;
+    if crate::lazyto::enabled() {
+        match lazyto_serve(&window, &job.name, len) {
+            Serve::Live => {
+                log::info!("{}: being recorded; refusing", job.name);
+                send_503(&resp, http::ERR_LIVE);
+                return Ok(());
+            }
+            Serve::Empty => {
+                resp.send(S_404, H_JSON, http::ERR_NOT_FOUND);
+                return Ok(());
+            }
+            Serve::Go(h) => hashing = h,
+        }
+        super::project(len.saturating_sub(job.start));
+    }
+
     if job.start >= len {
         let cr = std::ffi::CString::new(format!("bytes */{len}"))?;
         resp.status(S_416);
@@ -243,7 +325,26 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
     };
     let gzip = stream.is_some();
 
-    if job.start > 0 {
+    let mut scratch = http::SCRATCH.lock().unwrap_or_else(|e| e.into_inner());
+    let http::Scratch { read: buf, out } = &mut *scratch;
+
+    if let Some(h) = hashing.as_mut() {
+        // a resumed request: the skipped prefix is hashed first, never sent
+        let mut left = job.start;
+        while left > 0 {
+            let want = (buf.len() as u64).min(left) as usize;
+            let n = match file.read(&mut buf[..want]) {
+                Ok(0) | Err(_) => {
+                    log::error!("{path}: could not read the skipped prefix, {left} B short");
+                    resp.send(S_500, H_JSON, http::ERR_STAT);
+                    return Ok(());
+                }
+                Ok(n) => n,
+            };
+            h.feed(&buf[..n]);
+            left -= n as u64;
+        }
+    } else if job.start > 0 {
         file.seek(SeekFrom::Start(job.start))?;
     }
 
@@ -265,9 +366,6 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
         resp.hdr(c"X-Replay-From", &from_echo);
     }
 
-    let mut scratch = http::SCRATCH.lock().unwrap_or_else(|e| e.into_inner());
-    let http::Scratch { read: buf, out } = &mut *scratch;
-
     crate::storage::msc::read_wait_reset();
 
     let mut sent = 0u64;
@@ -277,6 +375,7 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
     let mut chunks = 0u32;
     let mut read_us = 0u32;
     let mut read_max_us = 0u32;
+    let mut read_failed = false;
 
     {
         let mut sink = |block: &[u8]| -> anyhow::Result<()> {
@@ -290,12 +389,14 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
         };
 
         loop {
+            step(STEP_READ, bytes);
             let t0 = http::now_us();
             let n = match file.read(buf) {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(e) => {
                     log::error!("{path}: read failed after the header: {e}");
+                    read_failed = true;
                     break;
                 }
             };
@@ -303,6 +404,12 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
             read_us += took;
             read_max_us = read_max_us.max(took);
 
+            if let Some(h) = hashing.as_mut() {
+                step(STEP_HASH, bytes);
+                h.feed(&buf[..n]); // the raw bytes (gzip only outside LazyTO mode)
+            }
+
+            step(STEP_SEND, bytes);
             match stream.as_mut() {
                 Some(gz) => gz.push(&buf[..n], out, &mut sink)?,
                 None => sink(&buf[..n])?,
@@ -312,6 +419,7 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
             bytes += n as u64;
         }
 
+        step(STEP_FINISH, bytes);
         if let Some(gz) = stream.as_mut() {
             gz.finish(out, &mut sink)?;
         }
@@ -341,11 +449,61 @@ fn run(card: &SdCard, job: &Job) -> anyhow::Result<()> {
 
     resp.finish()?;
 
+    step(STEP_HASHED, bytes);
+    if let Some(h) = hashing.filter(|_| !read_failed) {
+        if h.complete() {
+            log::info!("{}: served whole and hashed", job.name);
+            crate::lazyto::sync::request_soon();
+        }
+    }
+
+    step(STEP_STATS, bytes);
     (stats.sd_wait_us, stats.sd_wait_max_us) = crate::storage::msc::read_wait();
     stats.total_us = (http::now_us() - t_start) as u32;
     http::publish_stats(stats);
     crate::journal::heap_checkin();
+
+    // each release on its own step: a transfer hung after its stats line
+    // (hardware, 2026-10-08), where only these drops were left
+    step(STEP_UNLOCK, bytes);
+    drop(scratch);
+    step(STEP_CLOSE_FILE, bytes);
+    drop(file);
+    step(STEP_UNMOUNT, bytes);
+    drop(window);
     Ok(())
+}
+
+enum Serve {
+    /// the file being recorded right now: not served yet
+    Live,
+    /// a 0-byte entry: nothing to serve
+    Empty,
+    /// serve it, hashing it when the SHA accelerator's context is there
+    Go(Option<crate::lazyto::served::Hashing>),
+}
+
+/// LazyTO mode: whether to serve `name` (opened, `len` bytes), and its hash.
+fn lazyto_serve(window: &crate::storage::fat::ReadWindow, name: &str, len: u64) -> Serve {
+    use crate::lazyto::{inventory, served, wire};
+
+    if len == 0 {
+        return Serve::Empty;
+    }
+    let Some((size, fdate, ftime)) =
+        crate::storage::fat::stat(&window.fat_path(&format!("SLIPPI/{name}")))
+    else {
+        return Serve::Go(None);
+    };
+    let mtime = wire::fat_mtime(fdate, ftime);
+    let key = wire::key(name, size, mtime);
+    if inventory::live_key() == Some(key) {
+        return Serve::Live;
+    }
+    if size as u64 != len {
+        return Serve::Go(None); // changing under us: served, never acked
+    }
+    Serve::Go(served::Hashing::begin(key, size, mtime))
 }
 
 fn header(r: *mut httpd_req_t, key: &CStr) -> Option<heapless::String<MAX_HDR>> {
@@ -380,9 +538,16 @@ unsafe extern "C" fn handle(r: *mut httpd_req_t) -> esp_err_t {
     let Ok(name) = heapless::String::<MAX_NAME>::try_from(name) else {
         return resp.send(S_404, H_JSON, http::ERR_NOT_FOUND);
     };
-    let Some(indexed_len) = scan::published_size(&name) else {
-        log::info!("refused {name}: not published");
-        return resp.send(S_404, H_JSON, http::ERR_NOT_FOUND);
+    // LazyTO mode serves any replay by name (LAZYTO.md); its size, and
+    // whether it is live, are checked against the card in the worker
+    let indexed_len = if crate::lazyto::enabled() {
+        None
+    } else {
+        let Some(len) = scan::published_size(&name) else {
+            log::info!("refused {name}: not published");
+            return resp.send(S_404, H_JSON, http::ERR_NOT_FOUND);
+        };
+        Some(len)
     };
 
     if let Some(short) = super::heap_too_low() {
@@ -415,12 +580,12 @@ unsafe extern "C" fn handle(r: *mut httpd_req_t) -> esp_err_t {
     let want = match (&range, &resume) {
         (http::RangeReq::Bad, _) | (_, http::Resume::Bad) => None,
         (http::RangeReq::From(n), _) | (http::RangeReq::None, http::Resume::At(n)) => {
-            (*n < indexed_len).then_some(*n)
+            indexed_len.is_none_or(|len| *n < len).then_some(*n)
         }
         (http::RangeReq::None, http::Resume::None) => Some(0),
     };
     let Some(start) = want else {
-        let Ok(cr) = std::ffi::CString::new(format!("bytes */{indexed_len}")) else {
+        let Ok(cr) = std::ffi::CString::new(format!("bytes */{}", indexed_len.unwrap_or(0))) else {
             return resp.send(S_500, H_JSON, http::ERR_STAT);
         };
         resp.status(S_416);
@@ -439,7 +604,13 @@ unsafe extern "C" fn handle(r: *mut httpd_req_t) -> esp_err_t {
     } else {
         gz::LEVEL_DEFAULT
     };
-    let gzip = !ranged && gz::accepted(header(r, c"Accept-Encoding").as_deref());
+    // LazyTO mode serves raw bytes: the gzip arena (15 KB) on top of the
+    // relay link's buffers left lwIP and Wi-Fi without heap, and a transfer
+    // stalled in send for good (hardware, 2026-10-08: 167 failed allocations,
+    // heap down to 1.4 KB)
+    let gzip = !ranged
+        && !crate::lazyto::enabled()
+        && gz::accepted(header(r, c"Accept-Encoding").as_deref());
 
     let mut async_req: *mut httpd_req_t = std::ptr::null_mut();
     if httpd_req_async_handler_begin(r, &mut async_req) != ESP_OK || async_req.is_null() {
@@ -455,7 +626,7 @@ unsafe extern "C" fn handle(r: *mut httpd_req_t) -> esp_err_t {
         resumed,
         gzip,
         level,
-        _transfer: super::Transfer::begin(indexed_len - start),
+        _transfer: super::Transfer::begin(indexed_len.map_or(0, |len| len - start)),
     };
 
     if let Err(job) = enqueue(job) {

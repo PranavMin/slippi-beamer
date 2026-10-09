@@ -33,6 +33,10 @@ pub fn set_fill(files: u32, cap: u32) {
     set(WarningLabel::DriveFilling, filling);
 }
 
+pub fn active(w: WarningLabel) -> bool {
+    ACTIVE.load(Ordering::Relaxed) & w.bit() != 0
+}
+
 pub fn any() -> bool {
     ACTIVE.load(Ordering::Relaxed) != 0
 }

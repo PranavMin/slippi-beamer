@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -18,6 +19,11 @@ extern "C"
 
    size_t beamer_gz_arena_size(void);
    size_t beamer_gz_arena_high_water(void);
+
+/* Hands the arena to the heap for good, for a station that never gzips
+ * (LazyTO mode); beamer_gz_begin fails from then on. False when it could
+ * not (a stream is open, or the heap refused the region). */
+bool beamer_gz_donate_arena(void);
 
 #ifdef __cplusplus
 }

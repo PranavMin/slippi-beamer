@@ -352,6 +352,8 @@ pub fn run() -> anyhow::Result<()> {
             restart();
         }
 
+        name::persist_due();
+
         std::thread::sleep(Duration::from_millis(250));
     }
 }
@@ -414,6 +416,7 @@ fn eject(sd: &SdCard, id: &StationId) {
     }
 
     journal::persist_now();
+    name::persist_now();
     storage::msc::set_media(false);
     mirror_in_window(sd, id);
     storage::msc::invalidate_all();
@@ -530,6 +533,7 @@ fn restart() -> ! {
         );
     }
     journal::persist_now();
+    name::persist_now();
     storage::msc::detach();
     std::thread::sleep(Duration::from_millis(50));
 
@@ -812,10 +816,17 @@ fn write_window(sd: &SdCard, id: &StationId) -> Outcome {
         }
     }
 
+    // LazyTO mode: the saved number, the secret, the ack table, and at a
+    // cold boot the erase, all before the bind (LAZYTO.md)
+    let settings = Settings::from(&outcome);
+    if settings.lazyto {
+        crate::lazyto::boot(&window, sd, id, &settings);
+    }
+
     log::info!("mirroring error.txt");
     errors::mirror(BASE_PATH, &station_id);
 
-    if Settings::from(&outcome).debug {
+    if settings.debug {
         volume::write_debug(BASE_PATH, &window, &station_id, reset_reason());
     }
 
@@ -891,6 +902,6 @@ HIDDEN=false
 NUM-REPLAYS-SERVED=10
 REPLAY-CAP=512
 LED-BRIGHTNESS=20
-FLIP-SCREEN=false
+FLIP-SCREEN=true
 DEBUG=false
 ";
