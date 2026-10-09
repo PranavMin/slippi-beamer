@@ -432,7 +432,9 @@ sockets, and lwIP has four active TCP connections: a download, a second HTTP ses
 listen backlog and the relay link, which the kiosk needs when it reports a score while a replay
 downloads. With one HTTP socket a request that arrived during a download hung the station: the
 download's session is async and never purged, so the server spun on its unaccepted listen socket
-at priority 5 and starved the transfer worker on the same core. Replays go out raw, never gzipped,
+at priority 5 and starved the transfer worker on the same core. After a download the worker waits
+up to 20 s for the client to hang up (upstream `ec27415`); the relay closes as soon as it has the
+last byte, and meanwhile the second session serves `/status`. Replays go out raw, never gzipped,
 whatever `Accept-Encoding` asks: the gzip arena (15 KB) does not fit beside the relay link's
 buffers, and a download that ran the heap out stalled in send for good. `POST /reset-beamer` is refused
 (`403`): its wipe withdraws the medium under a mounted Wii, whose FatFs never notices.
